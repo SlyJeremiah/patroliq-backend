@@ -1,0 +1,41 @@
+# Render Blueprint for the PATROLIQ API (https://render.com/docs/blueprint-spec).
+# Secrets are declared with `sync: false`: Render asks for their values when the Blueprint is created;
+# nothing secret lives in this file.
+services:
+  - type: web
+    name: patroliq-api
+    runtime: python
+    plan: starter
+    region: ohio          # same AWS region as the Neon project (us-east-2): keeps DB round trips ~1 ms
+    buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput
+    # Runs over DATABASE_URL_DIRECT (manage.py switches automatically for migrate).
+    preDeployCommand: python manage.py migrate --noinput
+    startCommand: gunicorn patroliq.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 120 --access-logfile -
+    healthCheckPath: /healthz/
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: DJANGO_DEBUG
+        value: "false"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DJANGO_ALLOWED_HOSTS
+        value: patroliq-api.onrender.com
+      - key: DJANGO_CSRF_TRUSTED_ORIGINS
+        value: https://patroliq-api.onrender.com
+      - key: DJANGO_SECURE_SSL_REDIRECT
+        value: "true"
+      - key: DJANGO_HSTS_SECONDS
+        value: "31536000"
+      - key: DATABASE_URL          # Neon pooled URL (host contains -pooler)
+        sync: false
+      - key: DATABASE_URL_DIRECT   # Neon direct URL, used by migrate
+        sync: false
+      - key: MEDIA_ROOT
+        value: /var/data/media
+      - key: NOTIFY_BACKEND
+        value: console
+    disk:
+      name: patroliq-media
+      mountPath: /var/data
+      sizeGB: 5

@@ -1,0 +1,18 @@
+{% extends "admin/login.html" %}
+{% block content %}
+{% if form.errors and not form.non_field_errors %}
+<p class="errornote">Please correct the errors below.</p>
+{% endif %}
+{% if form.non_field_errors %}
+{% for error in form.non_field_errors %}<p class="errornote">{{ error }}</p>{% endfor %}
+{% endif %}
+<div id="content-main">
+<form action="{{ app_path }}" method="post" id="login-form">{% csrf_token %}
+  <div class="form-row">{{ form.username.errors }}{{ form.username.label_tag }} {{ form.username }}</div>
+  <div class="form-row">{{ form.password.errors }}{{ form.password.label_tag }} {{ form.password }}
+    <input type="hidden" name="next" value="{{ next }}"></div>
+  <div class="form-row">{{ form.totp.errors }}{{ form.totp.label_tag }} {{ form.totp }}</div>
+  <div class="submit-row"><input type="submit" value="Log in"></div>
+</form>
+</div>
+{% endblock %}

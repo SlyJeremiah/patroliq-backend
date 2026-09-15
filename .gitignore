@@ -1,0 +1,32 @@
+# Python / virtualenv
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets: only the template is tracked
+.env
+.env.*
+!.env.example
+
+# Local databases
+db.sqlite3
+db.sqlite3-journal
+*.sqlite3
+
+# Uploaded media, collected static files
+media/
+staticfiles/
+
+# Logs
+*.log
+logs/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
