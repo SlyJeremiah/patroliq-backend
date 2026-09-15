@@ -33,10 +33,11 @@ from core.models import Tombstone
 from core.permissions import FIELD_ROLES, MANAGERS, ORG_ROLES, RANGER, IsOrgMember, roles_allowed
 from core.tenancy import TenantScopedMixin
 from core.utils import query_date, query_datetime, query_uuid
-from core.validation import reject_unexpected
+from core.validation import reject_unexpected, sanitize_text
 
 from . import services
-from .models import Media, Observation, Patrol, PositionPing, SafetyAlert, Species
+from .alerts import alert_detail, alert_item, find_alert, latest_dispatches, record_event, threat_alert_q  # noqa: F401
+from .models import Media, Observation, Patrol, PositionPing, SafetyAlert, Species, TrackPoint
 from .serializers import (
     MediaSerializer,
     ObservationListSerializer,
@@ -363,29 +364,7 @@ class SafetyAlertCancelView(APIView):
 
 # --- manager views -------------------------------------------------------------------------------
 
-def _alert_item(obj) -> dict:
-    dt = serializers.DateTimeField()
-    fmt = lambda v: dt.to_representation(v) if v else None  # noqa: E731
-    if isinstance(obj, SafetyAlert):
-        return {
-            "id": str(obj.pk), "type": "safety", "kind": obj.kind, "status": obj.status, "severity": "critical",
-            "ranger_id": str(obj.ranger_id), "ranger_name": obj.ranger.full_name, "area_id": None, "cell_id": None,
-            "lat": obj.lat, "lon": obj.lon, "accuracy_m": obj.accuracy_m, "battery_pct": obj.battery_pct,
-            "occurred_at": fmt(obj.started_at), "acknowledged_at": fmt(obj.acknowledged_at),
-            "resolved_at": fmt(obj.resolved_at), "note": obj.resolution_note,
-        }
-    return {
-        "id": str(obj.pk), "type": "threat", "kind": obj.subtype or obj.category,
-        "status": "acknowledged" if obj.acknowledged_at else "active", "severity": obj.severity,
-        "ranger_id": str(obj.observer_id), "ranger_name": obj.observer.full_name, "area_id": str(obj.area_id),
-        "cell_id": str(obj.cell_id) if obj.cell_id else None, "lat": obj.lat, "lon": obj.lon,
-        "accuracy_m": obj.accuracy_m, "battery_pct": None, "occurred_at": fmt(obj.recorded_at),
-        "acknowledged_at": fmt(obj.acknowledged_at), "resolved_at": None, "note": obj.notes,
-    }
-
-
-def threat_alert_q() -> Q:
-    return Q(alert_manager=True) | Q(category__in=["threat", "carcass"], severity__in=["high", "critical"])
+_alert_item = alert_item  # backwards-compatible name
 
 
 class AlertListView(APIView):
@@ -408,9 +387,81 @@ class AlertListView(APIView):
             safety, threats = safety.filter(status="active"), threats.filter(acknowledged_at__isnull=True)
         elif wanted == "acknowledged":
             safety, threats = safety.filter(status="acknowledged"), threats.filter(acknowledged_at__isnull=False)
-        items = [_alert_item(a) for a in safety[:limit]] + [_alert_item(o) for o in threats[:limit]]
+        rows = list(safety[:limit]) + list(threats[:limit])
+        dispatched = latest_dispatches(org, [r.pk for r in rows])
+        items = [alert_item(r, dispatched.get(r.pk)) for r in rows]
         items.sort(key=lambda x: x["occurred_at"] or "", reverse=True)
         return Response(items[:limit])
+
+
+class AlertDetailView(APIView):
+    """GET alerts/{id}/ — full alert incl. ``timeline``, ``dispatched_at`` and ``responders`` (spec §7)."""
+
+    permission_classes = [roles_allowed(read=MANAGERS)]
+
+    def get(self, request, alert_id):
+        alert = find_alert(request.user.organisation, alert_id)
+        if alert is None:
+            raise ApiError(404, "not_found", "Alert not found.")
+        return Response(alert_detail(alert))
+
+
+class AlertDispatchSerializer(serializers.Serializer):
+    note = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=5000)
+    responder_ids = serializers.ListField(child=serializers.UUIDField(), allow_empty=False, max_length=50)
+
+
+class AlertDispatchView(APIView):
+    """
+    POST alerts/{id}/dispatch/ {note, responder_ids} — send responders to an alert (spec §7).
+    Acknowledges an unacknowledged alert; notifies every responder by SMS (or push without a phone).
+    """
+
+    permission_classes = [roles_allowed(read=MANAGERS, write=MANAGERS)]
+
+    def post(self, request, alert_id):
+        from core.validation import sanitize_text
+        from notify.services import notify_user
+
+        reject_unexpected(request.data, {"note", "responder_ids"})
+        s = AlertDispatchSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        org = request.user.organisation
+        alert = find_alert(org, alert_id)
+        if alert is None:
+            raise ApiError(404, "not_found", "Alert not found.")
+        if isinstance(alert, SafetyAlert) and alert.status in ("resolved", "cancelled"):
+            raise ApiError(409, "alert_closed", f"The alert is already {alert.status}.")
+        note = sanitize_text(s.validated_data.get("note") or "")[:1000]
+        ids = list(dict.fromkeys(s.validated_data["responder_ids"]))
+        responders = list(User.objects.filter(organisation=org, is_active=True, pk__in=ids))
+        missing = sorted(str(i) for i in set(ids) - {u.pk for u in responders})
+        if missing:
+            raise ApiError(400, "validation_error", "Unknown or inactive responder(s).",
+                           fields={"responder_ids": [f"{m} is not an active user of this organisation." for m in missing]})
+        now = timezone.now()
+        if isinstance(alert, SafetyAlert) and alert.status == "active":
+            alert.status, alert.acknowledged_at, alert.acknowledged_by = "acknowledged", now, request.user
+            alert.save(update_fields=["status", "acknowledged_at", "acknowledged_by", "updated_at"])
+            record_event(alert, "acknowledged", actor=request.user, at=now)
+        elif isinstance(alert, Observation) and alert.acknowledged_at is None:
+            alert.acknowledged_at, alert.acknowledged_by = now, request.user
+            alert.save(update_fields=["acknowledged_at", "acknowledged_by", "updated_at"])
+            record_event(alert, "acknowledged", actor=request.user, at=now)
+        record_event(alert, "dispatched", actor=request.user, note=note, responder_ids=[u.pk for u in responders], at=now)
+
+        item = alert_item(alert)
+        where = f"{item['lat']:.5f},{item['lon']:.5f}" if item["lat"] is not None and item["lon"] is not None else "no GPS fix"
+        cell = f" [{alert.cell.label}]" if isinstance(alert, Observation) and alert.cell_id else ""
+        body = (f"Respond to {item['kind'].replace('_', ' ')} ({item['severity'] or 'n/a'}) reported by "
+                f"{item['ranger_name']} at {where}{cell}." + (f" Note: {note}" if note else ""))
+        channels = {}
+        for u in responders:
+            channels[str(u.pk)] = notify_user(u, "PATROLIQ DISPATCH", body,
+                                              {"type": "dispatch", "alert_id": str(alert.pk), "alert_type": item["type"]})
+        audit(request, "alert.dispatch", target=alert, detail={
+            "responder_ids": [str(u.pk) for u in responders], "channels": channels, "note": note})
+        return Response(alert_detail(alert))
 
 
 class AlertAcknowledgeView(APIView):
@@ -421,20 +472,23 @@ class AlertAcknowledgeView(APIView):
         org = request.user.organisation
         now = timezone.now()
         alert = SafetyAlert.objects.for_org(org).select_related("ranger").filter(pk=alert_id).first()
+        note = sanitize_text(str(request.data.get("note") or ""))[:1000]
         if alert:
             if alert.status == "active":
                 alert.status, alert.acknowledged_at, alert.acknowledged_by = "acknowledged", now, request.user
                 alert.save(update_fields=["status", "acknowledged_at", "acknowledged_by", "updated_at"])
+                record_event(alert, "acknowledged", actor=request.user, note=note, at=now)
             audit(request, "safety_alert.acknowledge", target=alert)
-            return Response(_alert_item(alert))
+            return Response(alert_item(alert, latest_dispatches(org, [alert.pk]).get(alert.pk)))
         obs = Observation.objects.for_org(org).filter(threat_alert_q()).select_related("observer").filter(pk=alert_id).first()
         if obs is None:
             raise ApiError(404, "not_found", "Alert not found.")
         if obs.acknowledged_at is None:
             obs.acknowledged_at, obs.acknowledged_by = now, request.user
             obs.save(update_fields=["acknowledged_at", "acknowledged_by", "updated_at"])
+            record_event(obs, "acknowledged", actor=request.user, note=note, at=now)
         audit(request, "observation.acknowledge", target=obs)
-        return Response(_alert_item(obs))
+        return Response(alert_item(obs, latest_dispatches(org, [obs.pk]).get(obs.pk)))
 
 
 class AlertResolveView(APIView):
@@ -448,13 +502,13 @@ class AlertResolveView(APIView):
         if alert is None:
             raise ApiError(404, "not_found", "Safety alert not found.")
         if alert.status in ("active", "acknowledged"):
-            from core.validation import sanitize_text
-
             alert.status, alert.resolved_at = "resolved", timezone.now()
             alert.resolution_note = sanitize_text(str(request.data.get("note") or ""))[:1000] or None
             alert.save(update_fields=["status", "resolved_at", "resolution_note", "updated_at"])
+            record_event(alert, "resolved", actor=request.user, note=alert.resolution_note or "", at=alert.resolved_at)
             audit(request, "safety_alert.resolve", target=alert)
-        return Response(_alert_item(alert))
+        org = request.user.organisation
+        return Response(alert_item(alert, latest_dispatches(org, [alert.pk]).get(alert.pk)))
 
 
 class _FieldListMixin(TenantScopedMixin):
@@ -498,6 +552,71 @@ class PatrolViewSet(_FieldListMixin, viewsets.ReadOnlyModelViewSet):
     permission_classes = [roles_allowed(read=FIELD_ROLES)]
     date_field = "started_at"
     person_field = "ranger"
+
+
+class PatrolTrackView(APIView):
+    """
+    GET patrols/{client_uuid}/track/ → GeoJSON Feature (LineString) for the dashboard map (spec §7).
+    ``geometry`` is null while the patrol has fewer than two track points. Additive properties:
+    ``client_uuid``, ``ranger_name``, ``patrol_type``, ``duration_s``, ``point_count`` and ``times``
+    (ISO timestamps parallel to the coordinates, for replay).
+    """
+
+    permission_classes = [roles_allowed(read=MANAGERS)]
+
+    def get(self, request, client_uuid):
+        patrol = Patrol.objects.for_org(request.user.organisation).select_related("ranger").filter(pk=client_uuid).first()
+        if patrol is None:
+            raise ApiError(404, "not_found", "Patrol not found.")
+        pts = list(TrackPoint.objects.filter(organisation_id=patrol.organisation_id, patrol_id=patrol.pk)
+                   .order_by("recorded_at").values_list("lon", "lat", "recorded_at"))
+        dt = serializers.DateTimeField()
+        coords = [[round(lon, 7), round(lat, 7)] for lon, lat, _ in pts]
+        return Response({
+            "type": "Feature",
+            "id": str(patrol.pk),
+            "geometry": {"type": "LineString", "coordinates": coords} if len(coords) >= 2 else None,
+            "properties": {
+                "client_uuid": str(patrol.pk), "ranger_id": str(patrol.ranger_id),
+                "ranger_name": patrol.ranger.full_name, "started_at": dt.to_representation(patrol.started_at),
+                "ended_at": dt.to_representation(patrol.ended_at) if patrol.ended_at else None,
+                "distance_m": int(round(patrol.distance_m or 0)), "duration_s": patrol.duration_s,
+                "status": patrol.status, "patrol_type": patrol.patrol_type, "area_id": str(patrol.area_id),
+                "point_count": len(coords), "times": [dt.to_representation(t) for _, _, t in pts],
+            },
+        })
+
+
+class PositionHistoryView(APIView):
+    """GET positions/history/?ranger_id=&since=&until= (window ≤ 24 h) → [{recorded_at, lat, lon, battery_pct}]."""
+
+    permission_classes = [roles_allowed(read=MANAGERS)]
+    MAX_WINDOW = timedelta(hours=24)
+
+    def get(self, request):
+        org = request.user.organisation
+        ranger_id = query_uuid(request, "ranger_id")
+        if ranger_id is None:
+            raise ApiError(400, "validation_error", "ranger_id is required.", fields={"ranger_id": ["This field is required."]})
+        if not User.objects.filter(organisation=org, pk=ranger_id).exists():
+            raise ApiError(404, "not_found", "Ranger not found.")
+        since, until = query_datetime(request, "since"), query_datetime(request, "until")
+        if since is None and until is None:
+            until = timezone.now()
+        if since is None:
+            since = until - self.MAX_WINDOW
+        if until is None:
+            until = min(since + self.MAX_WINDOW, timezone.now()) if since < timezone.now() else since + self.MAX_WINDOW
+        if until < since:
+            raise ApiError(400, "validation_error", "until must not be before since.", fields={"until": ["Must be after since."]})
+        if until - since > self.MAX_WINDOW:
+            raise ApiError(400, "window_too_large", "The time window may be at most 24 hours.",
+                           fields={"since": ["Window exceeds 24 hours."]})
+        dt = serializers.DateTimeField()
+        rows = (PositionPing.objects.for_org(org).filter(ranger_id=ranger_id, recorded_at__gte=since, recorded_at__lte=until)
+                .order_by("recorded_at").values_list("recorded_at", "lat", "lon", "battery_pct"))
+        return Response([{"recorded_at": dt.to_representation(t), "lat": lat, "lon": lon, "battery_pct": b}
+                         for t, lat, lon, b in rows])
 
 
 class SpeciesListView(APIView):

@@ -58,7 +58,8 @@ DECLARE
     'areas_area', 'areas_featurelayer', 'areas_apubase', 'areas_sector', 'areas_grtscell', 'areas_team',
     'areas_assignment', 'areas_riskscore',
     'field_patrol', 'field_trackpoint', 'field_observation', 'field_media', 'field_safetyalert',
-    'field_positionping',
+    'field_positionping', 'field_alertevent',
+    'dashboard_report', 'dashboard_reportshare',
     'core_tombstone', 'audit_auditlog', 'notify_notificationlog'
   ];
 BEGIN

@@ -7,19 +7,7 @@ from .models import AuditLog
 logger = logging.getLogger("patroliq.audit")
 
 
-def client_ip(request) -> str | None:
-    """REMOTE_ADDR; X-Forwarded-For only when a trusted proxy count is configured."""
-    if request is None:
-        return None
-    from django.conf import settings
-
-    hops = getattr(settings, "TRUSTED_PROXY_HOPS", 0)
-    xff = request.META.get("HTTP_X_FORWARDED_FOR")
-    if hops and xff:
-        parts = [p.strip() for p in xff.split(",") if p.strip()]
-        if len(parts) >= hops:
-            return parts[-hops]
-    return request.META.get("REMOTE_ADDR")
+from core.net import client_ip  # noqa: F401  (re-exported; REMOTE_ADDR or the right-most untrusted XFF hop)
 
 
 def audit(request, action: str, target=None, detail: dict | None = None, *, actor=None, organisation_id=None,

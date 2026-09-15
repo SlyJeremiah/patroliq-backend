@@ -21,6 +21,47 @@ class AreaSerializer(serializers.ModelSerializer):
                   "area_km2", "timezone", "grid_cell_size_m", "status", "updated_at"]
 
 
+class AreaSetupSerializer(AreaSerializer):
+    """
+    ``GET areas/`` for the dashboard (spec §7): adds setup counters. Counts come from queryset annotations
+    (``AreaViewSet``) and fall back to per-object queries for single objects (create/patch responses).
+    """
+
+    apu_base_count = serializers.SerializerMethodField()
+    cell_count = serializers.SerializerMethodField()
+    team_count = serializers.SerializerMethodField()
+    sector_count = serializers.SerializerMethodField()
+    setup = serializers.SerializerMethodField()
+
+    class Meta(AreaSerializer.Meta):
+        fields = AreaSerializer.Meta.fields + ["apu_base_count", "cell_count", "team_count", "sector_count", "setup"]
+
+    @staticmethod
+    def _count(obj, related):
+        attr = f"n_{related}"
+        value = getattr(obj, attr, None)
+        if value is None:
+            value = getattr(obj, related).count()
+            setattr(obj, attr, value)
+        return value
+
+    def get_apu_base_count(self, obj):
+        return self._count(obj, "apu_bases")
+
+    def get_cell_count(self, obj):
+        return self._count(obj, "cells")
+
+    def get_team_count(self, obj):
+        return self._count(obj, "teams")
+
+    def get_sector_count(self, obj):
+        return self._count(obj, "sectors")
+
+    def get_setup(self, obj):
+        return {"boundary": bool(obj.boundary), "bases": self.get_apu_base_count(obj) > 0,
+                "grid": self.get_cell_count(obj) > 0, "teams": self.get_team_count(obj) > 0}
+
+
 class AreaWriteSerializer(StrictModelSerializer):
     # Status: only draft/archived via PATCH; ``active`` goes through areas/{id}/activate/ checks.
     status = serializers.ChoiceField(choices=["draft", "archived"], required=False)
@@ -57,6 +98,7 @@ class GridGenerateSerializer(StrictSerializer):
     cell_size_m = serializers.IntegerField(min_value=100, max_value=20000, required=False)
     force = serializers.BooleanField(required=False, default=False)
     seed = serializers.CharField(required=False, max_length=64)
+    dry_run = serializers.BooleanField(required=False, default=False)
 
 
 class ApuBaseSerializer(StrictModelSerializer):

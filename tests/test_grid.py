@@ -24,7 +24,9 @@ def test_grid_counts_labels_and_sectors():
     assert r.status_code == 200, r.content
     assert r.json() == {"cells_created": 20, "sectors_created": 2}
 
-    cells = c.get(f"/api/v1/areas/{area.pk}/cells/").json()
+    fc = c.get(f"/api/v1/areas/{area.pk}/cells/").json()
+    assert fc["type"] == "FeatureCollection"
+    cells = [{**f["properties"], "geometry": f["geometry"]} for f in fc["features"]]
     assert len(cells) == 20
     assert [x["grts_order"] for x in cells] == list(range(1, 21))
     assert [x["label"] for x in cells] == [f"GRTS-{i:03d}" for i in range(1, 21)]

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from django.db import transaction
-from django.db.models import ProtectedError, Q
+from django.db.models import Count, IntegerField, OuterRef, ProtectedError, Q, Subquery
+from django.db.models.functions import Coalesce
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -20,7 +21,8 @@ from . import services
 from .models import ApuBase, Area, Assignment, FeatureLayer, GrtsCell, Sector, Team
 from .serializers import (
     ApuBaseSerializer,
-    AreaSerializer,
+    AreaSetupSerializer as AreaSerializer,
+    AreaSetupSerializer,
     AreaWriteSerializer,
     AssignmentSerializer,
     BoundarySerializer,
@@ -31,6 +33,12 @@ from .serializers import (
 )
 
 MAX_BOUNDARY_UPLOAD = 50 * 1024 * 1024
+
+
+def _count_subquery(model):
+    return Coalesce(Subquery(
+        model.objects.filter(area_id=OuterRef("pk")).order_by().values("area_id").annotate(n=Count("pk")).values("n")[:1],
+        output_field=IntegerField()), 0)
 
 
 def ranger_area_filter(user) -> Q:
@@ -46,13 +54,16 @@ class AreaViewSet(TenantScopedMixin, viewsets.ModelViewSet):
     http_method_names = ["get", "post", "patch", "put", "delete", "head", "options"]
 
     def get_serializer_class(self):
-        return AreaSerializer if self.request.method in ("GET", "HEAD", "OPTIONS") else AreaWriteSerializer
+        return AreaSetupSerializer if self.request.method in ("GET", "HEAD", "OPTIONS") else AreaWriteSerializer
 
     def scope_queryset(self, qs):
         if self.request.user.role == RANGER:
-            qs = qs.filter(ranger_area_filter(self.request.user)).distinct()
+            qs = qs.filter(pk__in=Area.objects.filter(ranger_area_filter(self.request.user)).values("pk"))
         if self.request.query_params.get("status"):
             qs = qs.filter(status=self.request.query_params["status"])
+        if self.request.method in ("GET", "HEAD") and getattr(self, "action", None) in ("list", "retrieve"):
+            qs = qs.annotate(**{f"n_{name}": _count_subquery(model) for name, model in (
+                ("apu_bases", ApuBase), ("cells", GrtsCell), ("teams", Team), ("sectors", Sector))})
         return qs
 
     def update(self, request, *args, **kwargs):
@@ -149,6 +160,8 @@ class AreaViewSet(TenantScopedMixin, viewsets.ModelViewSet):
         require_module(request.user.organisation, "grts")
         s = GridGenerateSerializer(data=request.data)
         s.is_valid(raise_exception=True)
+        if s.validated_data["dry_run"]:
+            return Response(services.preview_grid(area, s.validated_data.get("cell_size_m"), s.validated_data.get("seed")))
         result = services.generate_grid(area, s.validated_data.get("cell_size_m"), s.validated_data["force"],
                                         s.validated_data.get("seed"))
         audit(request, "area.grid_generate", target=area, detail={**result, "cell_size_m": area.grid_cell_size_m})
@@ -169,8 +182,9 @@ class AreaViewSet(TenantScopedMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"], permission_classes=[roles_allowed(read=ORG_ROLES)])
     def cells(self, request, pk=None):
+        """GeoJSON FeatureCollection of the area's cells (spec §7; properties id, label, grts_order, sector_id)."""
         area = self.get_object()
-        return Response(GrtsCellSerializer(GrtsCell.objects.filter(area=area), many=True).data)
+        return Response(services.cells_feature_collection(GrtsCell.objects.filter(area=area).order_by("grts_order")))
 
     @action(detail=True, methods=["get"], permission_classes=[roles_allowed(read=ORG_ROLES)])
     def sectors(self, request, pk=None):

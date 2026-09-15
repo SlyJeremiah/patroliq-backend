@@ -44,14 +44,8 @@ def grid_in_use(area: Area) -> bool:
     )
 
 
-@transaction.atomic
-def generate_grid(area: Area, cell_size_m: int | None = None, force: bool = False, seed: str | None = None) -> dict:
-    """Replace the area's grid. Refused (409 ``grid_in_use``) when field data references cells unless ``force``."""
+def _build_cells(area: Area, cell_size_m: int, seed: str | None):
     boundary = area_shape(area)
-    cell_size_m = int(cell_size_m or area.grid_cell_size_m or 1000)
-    if GrtsCell.objects.filter(area=area).exists() and not force and grid_in_use(area):
-        raise ApiError(409, "grid_in_use", "Patrol data references the current grid; pass force=true to replace it.")
-
     bases = list(ApuBase.objects.filter(area=area).order_by("code"))
     try:
         cells = geo.build_grid(
@@ -60,6 +54,44 @@ def generate_grid(area: Area, cell_size_m: int | None = None, force: bool = Fals
         )
     except geo.GeoError as exc:
         raise geo_api_error(exc)
+    return bases, cells
+
+
+def preview_grid(area: Area, cell_size_m: int | None = None, seed: str | None = None) -> dict:
+    """``dry_run``: the grid that ``generate_grid`` would create, as GeoJSON, without saving anything."""
+    cell_size_m = int(cell_size_m or area.grid_cell_size_m or 1000)
+    bases, cells = _build_cells(area, cell_size_m, seed)
+    features = [{
+        "type": "Feature",
+        "id": None,
+        "geometry": c.geometry,
+        "properties": {"id": None, "label": c.label, "grts_order": c.grts_order, "sector_id": None,
+                       "apu_base_id": str(bases[c.base_index].pk) if c.base_index is not None else None},
+    } for c in cells]
+    return {"cells_created": len(cells), "sectors_created": len(bases) or 1, "cell_size_m": cell_size_m,
+            "dry_run": True, "cells": {"type": "FeatureCollection", "features": features}}
+
+
+def cells_feature_collection(cells) -> dict:
+    return {"type": "FeatureCollection", "features": [{
+        "type": "Feature",
+        "id": str(c.pk),
+        "geometry": c.geometry,
+        "properties": {"id": str(c.pk), "label": c.label, "grts_order": c.grts_order,
+                       "sector_id": str(c.sector_id) if c.sector_id else None, "area_id": str(c.area_id),
+                       "centroid": c.centroid},
+    } for c in cells]}
+
+
+@transaction.atomic
+def generate_grid(area: Area, cell_size_m: int | None = None, force: bool = False, seed: str | None = None) -> dict:
+    """Replace the area's grid. Refused (409 ``grid_in_use``) when field data references cells unless ``force``."""
+    area_shape(area)
+    cell_size_m = int(cell_size_m or area.grid_cell_size_m or 1000)
+    if GrtsCell.objects.filter(area=area).exists() and not force and grid_in_use(area):
+        raise ApiError(409, "grid_in_use", "Patrol data references the current grid; pass force=true to replace it.")
+
+    bases, cells = _build_cells(area, cell_size_m, seed)
 
     old_cell_ids = list(GrtsCell.objects.filter(area=area).values_list("pk", flat=True))
     old_sector_ids = list(Sector.objects.filter(area=area).values_list("pk", flat=True))

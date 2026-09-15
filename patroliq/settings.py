@@ -40,7 +40,7 @@ def env_list(name: str, default: str = "") -> list[str]:
 
 DEBUG = env_bool("DJANGO_DEBUG", False)
 
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "")
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or os.environ.get("SECRET_KEY") or ""
 if not SECRET_KEY:
     if DEBUG:
         # Ephemeral per-process key for local development only. API tokens are stored in the
@@ -52,9 +52,14 @@ if not SECRET_KEY:
         raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set when DJANGO_DEBUG is false.")
 
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,10.0.2.2")
+CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS")
+# Render sets RENDER_EXTERNAL_HOSTNAME (e.g. patroliq-api.onrender.com) on every web service.
+_RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "").strip()
+if _RENDER_HOST:
+    ALLOWED_HOSTS.append(_RENDER_HOST)
+    CSRF_TRUSTED_ORIGINS.append(f"https://{_RENDER_HOST}")
 if DEBUG:
     ALLOWED_HOSTS = ["*"]
-CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS")
 
 ADMIN_ENABLED = env_bool("DJANGO_ADMIN_ENABLED", True)
 
@@ -65,6 +70,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "corsheaders",
     "rest_framework",
     "core",
     "accounts",
@@ -73,12 +79,16 @@ INSTALLED_APPS = [
     "audit",
     "notify",
     "platform_admin",
+    "dashboard",
 ]
 
 MIDDLEWARE = [
+    "core.middleware.HealthCheckMiddleware",  # before host validation / SSL redirect (platform health checks)
+    "corsheaders.middleware.CorsMiddleware",  # early, so every response (incl. 403 ip_not_allowed) gets CORS headers
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "core.middleware.GzipRequestMiddleware",
+    "core.middleware.WebIpAllowlistMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -150,6 +160,37 @@ USE_TZ = True
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT") or (BASE_DIR / "media"))
+
+# --- File storage (uploads + generated reports) ------------------------------------------------
+# Local filesystem under MEDIA_ROOT by default. When the Cloudflare R2 variables are all set, the
+# default storage becomes the S3-compatible R2 bucket (django-storages). Files are never served from
+# public bucket URLs: every download goes through an authenticated, tenant-scoped API view that
+# streams the object (the bucket should stay private).
+R2_BUCKET = os.environ.get("R2_BUCKET", "").strip()
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "").strip()
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "").strip()
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "").strip()
+USE_R2 = all([R2_BUCKET, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY])
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+}
+if USE_R2:
+    STORAGES["default"] = {
+        "BACKEND": "storages.backends.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": R2_BUCKET,
+            "endpoint_url": os.environ.get("R2_ENDPOINT_URL") or f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+            "access_key": R2_ACCESS_KEY_ID,
+            "secret_key": R2_SECRET_ACCESS_KEY,
+            "region_name": "auto",
+            "signature_version": "s3v4",
+            "location": os.environ.get("R2_LOCATION", ""),
+            "default_acl": None,
+            "querystring_auth": True,
+            "file_overwrite": False,
+        },
+    }
 MEDIA_MAX_BYTES = env_int("MEDIA_MAX_BYTES", 25 * 1024 * 1024)
 DATA_UPLOAD_MAX_MEMORY_SIZE = env_int("DATA_UPLOAD_MAX_BYTES", 20 * 1024 * 1024)
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
@@ -162,6 +203,28 @@ LOGIN_LOCKOUT_MINUTES = env_int("LOGIN_LOCKOUT_MINUTES", 15)
 TOTP_ISSUER = os.environ.get("TOTP_ISSUER", "PATROLIQ")
 
 NOTIFY_BACKEND = os.environ.get("NOTIFY_BACKEND", "console")
+
+# --- Web dashboard: CORS + network ---------------------------------------------------------------
+# Token auth only (no cookies), so credentials are never allowed cross-origin.
+CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS")
+CORS_ALLOWED_ORIGIN_REGEXES = [r for r in [os.environ.get("CORS_ALLOWED_ORIGIN_REGEX", "").strip()] if r]
+CORS_ALLOW_HEADERS = ["authorization", "content-type"]
+CORS_EXPOSE_HEADERS = ["retry-after", "content-disposition"]
+CORS_ALLOW_CREDENTIALS = False
+CORS_URLS_REGEX = r"^/(api/|healthz/)"
+CORS_PREFLIGHT_MAX_AGE = 3600
+
+# Optional allowlist (PRD 7.3) for web roles: comma-separated CIDRs; empty = no restriction.
+WEB_IP_ALLOWLIST = env_list("WEB_IP_ALLOWLIST")
+# Number of reverse proxies in front of the app that append to X-Forwarded-For (Render: 1).
+# The client IP is the right-most untrusted hop. 0 = use REMOTE_ADDR.
+TRUSTED_PROXY_COUNT = env_int("TRUSTED_PROXY_COUNT", 1 if os.environ.get("RENDER") else 0)
+TRUSTED_PROXY_HOPS = TRUSTED_PROXY_COUNT  # backwards-compatible name used by audit.utils
+
+# Optional public URL of the web dashboard; report share links point there when set
+# (``<DASHBOARD_URL>/reports/shared/<token>``), otherwise at the API endpoint.
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "").strip().rstrip("/")
+REPORT_SHARE_HOURS = env_int("REPORT_SHARE_HOURS", 48)
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["accounts.auth.ExpiringTokenAuthentication"],

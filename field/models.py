@@ -172,6 +172,28 @@ class SafetyAlert(TenantModel, TimeStampedModel):
         ordering = ["-started_at"]
 
 
+class AlertEvent(TenantModel):
+    """
+    Timeline of manager actions on an alert (spec §7 ``alerts/{id}/``). ``alert_id`` is the id used by
+    ``alerts/`` — a SafetyAlert client_uuid (``alert_type = safety``) or an Observation client_uuid
+    (``threat``); a soft reference because it can point at either table.
+    """
+
+    ACTIONS = [(c, c.title()) for c in ["acknowledged", "dispatched", "resolved", "cancelled", "note"]]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    alert_id = models.UUIDField(db_index=True)
+    alert_type = models.CharField(max_length=8, choices=[("safety", "Safety"), ("threat", "Threat")])
+    action = models.CharField(max_length=16, choices=ACTIONS)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+                              related_name="+")
+    note = models.TextField(blank=True, default="")
+    responder_ids = models.JSONField(default=list, blank=True)
+    at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        ordering = ["at"]
+
+
 class PositionPing(TenantModel):
     id = models.BigAutoField(primary_key=True)
     ranger = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="position_pings")

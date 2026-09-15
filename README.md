@@ -21,6 +21,7 @@ Stack: Python 3.11 · Django 5.2 · Django REST Framework · shapely / pyproj / 
 | `audit/` | append-only AuditLog |
 | `notify/` | SMS/push provider interface (console, Twilio/FCM) + NotificationLog |
 | `platform_admin/` | zrGISsolutions `/platform/` endpoints (named to avoid shadowing stdlib `platform`) |
+| `dashboard/` | manager dashboard API (spec §7): summary, live rangers, coverage, risk, reports (PDF/CSV/GeoJSON) |
 | `sql/postgres_rls.sql` | PostgreSQL RLS policies, audit-log trigger, app-role grants |
 | `tests/` | pytest suite |
 
@@ -57,7 +58,13 @@ All secrets come from the environment (optionally a git-ignored `.env`). See `.e
 | `LOGIN_MAX_FAILURES` / `LOGIN_LOCKOUT_MINUTES` | 5 / 15 | per-identifier lockout |
 | `LOGIN_THROTTLE_RATE` | `30/min` | per-IP throttle on `auth/login/` |
 | `DJANGO_ADMIN_ENABLED` | `true` | Django admin at `/ops-admin/` (superusers, password **+ TOTP**) |
-| `MEDIA_ROOT` / `MEDIA_MAX_BYTES` | `backend/media` / 25 MB | uploaded photos/video/audio |
+| `MEDIA_ROOT` / `MEDIA_MAX_BYTES` | `backend/media` / 25 MB | uploaded photos/video/audio and generated reports (local storage) |
+| `R2_BUCKET`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | — | all four set → uploads + reports go to a **private** Cloudflare R2 bucket (django-storages S3); downloads still stream through the API. Optional `R2_ENDPOINT_URL`, `R2_LOCATION` |
+| `CORS_ALLOWED_ORIGINS` | — | comma-separated dashboard origins, e.g. `https://patroliq-dashboard.vercel.app` |
+| `CORS_ALLOWED_ORIGIN_REGEX` | — | e.g. `^https://patroliq-dashboard-[a-z0-9-]+\.vercel\.app$` (preview deploys) |
+| `WEB_IP_ALLOWLIST` | — (off) | comma-separated CIDRs; web roles + web sign-in from other IPs → `403 ip_not_allowed` |
+| `TRUSTED_PROXY_COUNT` | 1 on Render (`RENDER` set), else 0 | proxies appending to `X-Forwarded-For`; client IP = right-most untrusted hop |
+| `DASHBOARD_URL` / `REPORT_SHARE_HOURS` | — / 48 | base URL for report share links / share lifetime |
 | `DATA_UPLOAD_MAX_BYTES` | 20 MB | max JSON body (sync push), also the gzip decompression cap |
 | `NOTIFY_BACKEND` | `console` | `console` or `twilio_fcm` |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | — | SMS (twilio_fcm) |
@@ -82,8 +89,21 @@ per database — scan the printed `otpauth://` URI into Google Authenticator/Aut
 
 GRTTS: licence `standard`, all modules, expires 2027-09-30. **Mazowe Conservancy** (client Mazowe
 Landholders Trust): ~12 × 10 km boundary near -17.50, 30.95; bases `APU-1 HQ Camp`,
-`APU-2 Mazowe River`, `APU-3 Boundary Road`; 1 km GRTS grid; 3 sectors; demo roads/water layers; one
-ended patrol with a snare report; 35 species; risk scores for today.
+`APU-2 Mazowe River`, `APU-3 Boundary Road`; 1 km GRTS grid; 3 sectors; demo roads/water layers; 35 species.
+
+Dashboard demo data (GRTTS, relative to the time the seed runs, so re-run it to refresh "today"):
+
+* 9 rangers in three teams — Mazowe River Team at APU-2 (Tendai Moyo, Farai Ncube, Rudo Chikore),
+  HQ Camp Team at APU-1 (Sipho Ndlovu, Kuda Dube, Blessing Nyathi), Boundary Road Team at APU-3
+  (Precious Mpofu, Lindiwe Sibanda, Tatenda Gumbo); all `GRTTS` / `RGR-2026-038…048` / `patrol123`.
+* ~65 patrols over the past 30 days with realistic foot/vehicle tracks (~7 000 track points) inside
+  Mazowe cells and ~160 observations (wildlife with sex/counts, snares, fence cuts, carcasses).
+* Live now: Tendai **active** (pings every few minutes, critical **poacher camp** alert), Sipho **paused**,
+  Precious with an open patrol but **offline** (last ping 55 min ago).
+* A poached elephant carcass alert (acknowledged), a dead man's switch alert for Kuda (acknowledged,
+  responders dispatched, resolved), yesterday's high snare alert (open).
+* Risk scores for the last 31 days (trend charts) and two generated reports (patrol summary PDF,
+  wildlife census CSV). Everything is bulk inserted with fixed ids, so re-running replaces the same rows.
 
 Recompute risk: `manage.py score_risk --date 2026-09-15 [--org GRTTS] [--area <uuid>] [--hour 20]`
 (schedule nightly with cron / Task Scheduler).
@@ -104,7 +124,23 @@ Covers tenant isolation, licence limits/suspension/SOS, login + lockout + TOTP, 
 boundary import (shapefile zip in UTM with `.prj`, no-`.prj`, multi-feature, GeoJSON, KML, drawn),
 bases outside boundary, grid counts/labels/sectors/GRTS balance, bootstrap + `since` + deletions, push
 idempotency + cell assignment, media, positions, gzip bodies, sex/count validation, safety alerts
-(notifications + audit), audit immutability, risk engine.
+(notifications + audit), audit immutability, risk engine, and the dashboard API (`test_dashboard.py`,
+`test_reports.py`, `test_network.py`: roles, tenancy, live status, coverage statuses, risk trend, dispatch,
+grid preview, every report type/format, anonymisation, share expiry, CORS, IP allowlist, seeded summary).
+
+## Local API for dashboard development
+
+```powershell
+cd D:\freelance\PatrolIQ\backend
+$env:DJANGO_DEBUG="true"; $env:DATABASE_URL="sqlite:///db.sqlite3"; $env:DATABASE_URL_DIRECT=""
+$env:CORS_ALLOWED_ORIGIN_REGEX='^http://(localhost|127\.0\.0\.1):\d+$'
+.venv\Scripts\python manage.py migrate
+.venv\Scripts\python manage.py seed_demo          # prints the TOTP secrets for Grace / Tafadzwa
+.venv\Scripts\python manage.py runserver 0.0.0.0:8000
+```
+
+The dashboard then calls `http://localhost:8000/api/v1/` from any `localhost` port (Vite, Next.js …).
+Sign in as `grace.mutasa@grtts.co.zw` / `manager123` + TOTP.
 
 ## API overview (`/api/v1/`)
 
@@ -118,6 +154,11 @@ Full contract: spec §5. Auth header `Authorization: Token <key>`. JSON snake_ca
   `sectors/`, additive `layers/roads|water/`), `apu-bases/`, `teams/`, `assignments/`, `users/`,
   `alerts/` (+ `acknowledge/`, additive `resolve/`), `observations/`, `patrols/`, `positions/latest/`,
   `audit-log/`, `species/`
+* **Manager dashboard (spec §7)** — `dashboard/summary/`, `rangers/` (+ `{id}/`, `{id}/message/`),
+  `patrols/{client_uuid}/track/`, `positions/history/`, `areas/{id}/risk/` (+ `trend/`),
+  `areas/{id}/coverage/` (+ `export/`), `reports/` (+ `{id}/`, `{id}/download/`, `{id}/share/`,
+  `shared/{token}/`), `alerts/{id}/`, `alerts/{id}/dispatch/`; `areas/` setup counters,
+  `grid/generate/` `dry_run`, `areas/{id}/cells/` as a GeoJSON FeatureCollection
 * **Platform** — `platform/organisations/`, `…/{id}/`, `…/{id}/licence/`, `…/{id}/usage/`
 * `GET /healthz/` — unauthenticated liveness + DB check
 
@@ -209,23 +250,53 @@ To enable it:
    bootstrap → push smoke test as the app role, and the cross-tenant tests in `tests/test_tenancy.py`
    against a deployment using the app role.
 
-## Deploy (Render + Neon)
+## Deploy on Render (+ Neon, Cloudflare R2, Vercel dashboard)
 
 `render.yaml` (Blueprint), `Procfile` and `.python-version` (3.11) are included; `gunicorn` is pinned in
 `requirements.txt`.
 
-1. Render → New → Blueprint → this repository. Enter `DATABASE_URL` (Neon pooled) and
-   `DATABASE_URL_DIRECT` (Neon direct) when prompted; `DJANGO_SECRET_KEY` is generated.
-2. Build: `pip install -r requirements.txt && python manage.py collectstatic --noinput`.
-   Pre-deploy: `python manage.py migrate --noinput` (over the direct URL). Start:
-   `gunicorn patroliq.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 120`.
-   (Plans without pre-deploy commands: append `&& python manage.py migrate --noinput` to the build.)
-3. Service region `ohio` = Neon `us-east-2`. Health check `/healthz/`.
-4. Set `DJANGO_ALLOWED_HOSTS` / `DJANGO_CSRF_TRUSTED_ORIGINS` to the real hostname; keep
-   `DJANGO_DEBUG=false`, `DJANGO_SECURE_SSL_REDIRECT=true`, `DJANGO_HSTS_SECONDS=31536000`.
-5. Uploads: `MEDIA_ROOT=/var/data/media` on the attached persistent disk (Render's filesystem is
-   otherwise ephemeral). Schedule `python manage.py score_risk` as a Render cron job (daily).
-6. Do not run `seed_demo` on a production database (it creates accounts with known passwords).
+1. **Neon**: copy the pooled and the direct connection strings of the database.
+2. **Cloudflare R2** (recommended; Render's filesystem is ephemeral): create a private bucket (no public
+   access, no custom domain) and an R2 API token with *Object Read & Write* on that bucket. Note the
+   account id, access key id and secret.
+3. **Render** → New → Blueprint → select `SlyJeremiah/patroliq-backend` (branch `main`). Render reads
+   `render.yaml` and prompts for every `sync: false` variable (table below). `DJANGO_SECRET_KEY` is generated.
+4. The Blueprint configures: build `pip install -r requirements.txt && python manage.py collectstatic --noinput`;
+   pre-deploy `python manage.py migrate --noinput` (over `DATABASE_URL_DIRECT`); start
+   `gunicorn patroliq.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 120 --access-logfile -`;
+   health check `/healthz/` (answered before host validation and the HTTPS redirect); region `ohio`
+   (= Neon `us-east-2`). Plans without pre-deploy commands: append `&& python manage.py migrate --noinput`
+   to the build command.
+5. After the first deploy open `https://<service>.onrender.com/healthz/` → `{"status": "ok", "database": true}`.
+6. **Vercel dashboard**: set its API base URL to `https://<service>.onrender.com/api/v1/` and put the
+   dashboard origin in `CORS_ALLOWED_ORIGINS` (and the preview pattern in `CORS_ALLOWED_ORIGIN_REGEX`).
+   Changing env vars on Render redeploys the service.
+7. Optional: `score_risk` as a daily Render cron job (`python manage.py score_risk`, same env vars);
+   create the first platform admin with `python manage.py createsuperuser` from the Render shell.
+   Do not run `seed_demo` on a production database (it creates accounts with known passwords).
+
+| Variable | Value on Render | Secret (`sync: false`) |
+|---|---|---|
+| `DATABASE_URL` | Neon **pooled** URL (`…-pooler…`, `sslmode=require`) | yes |
+| `DATABASE_URL_DIRECT` | Neon **direct** URL (migrations) | yes |
+| `DJANGO_SECRET_KEY` | generated by Render (`SECRET_KEY` is accepted as a fallback name) | generated |
+| `DJANGO_DEBUG` | `false` | |
+| `DJANGO_ALLOWED_HOSTS` | `.onrender.com` (+ your custom domain); `RENDER_EXTERNAL_HOSTNAME` is added automatically | |
+| `DJANGO_CSRF_TRUSTED_ORIGINS` | `https://*.onrender.com` (ops admin at `/ops-admin/`) | |
+| `DJANGO_SECURE_SSL_REDIRECT` / `DJANGO_HSTS_SECONDS` | `true` / `31536000` (`SECURE_PROXY_SSL_HEADER` trusts `X-Forwarded-Proto`) | |
+| `TRUSTED_PROXY_COUNT` | `1` | |
+| `CORS_ALLOWED_ORIGINS` | `https://patroliq-dashboard.vercel.app` | yes |
+| `CORS_ALLOWED_ORIGIN_REGEX` | `^https://patroliq-dashboard-[a-z0-9-]+\.vercel\.app$` | yes |
+| `DASHBOARD_URL` | `https://patroliq-dashboard.vercel.app` (share links) | yes |
+| `WEB_IP_ALLOWLIST` | empty, or office/VPN CIDRs | yes |
+| `R2_BUCKET`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | R2 bucket + token | yes |
+| `NOTIFY_BACKEND` | `console` until Twilio/FCM are configured, then `twilio_fcm` | |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | Twilio | yes |
+| `FCM_PROJECT_ID`, `FCM_ACCESS_TOKEN` | Firebase | yes |
+
+Without R2, uncomment the `disk` block in `render.yaml` and set `MEDIA_ROOT=/var/data/media` (single
+instance only). Reports whose stored file is missing (e.g. generated by `seed_demo` run from a laptop)
+are regenerated from their saved parameters on download.
 
 ## PostgreSQL + RLS deployment (self-hosted)
 
@@ -265,5 +336,8 @@ Python), keep serialising GeoJSON so the API contract is unchanged, then drop th
 * Uploads stored under `MEDIA_ROOT/uploads/<org>/…` with server-generated names, type checked against
   `kind`, served only through the authenticated, tenant-scoped `media/{id}/file/`.
 * Audit log for logins, admin changes, sync pushes, uploads and safety events; append-only.
-* Not included yet: IP allow-listing for the dashboard, CORS/CSP for the future web frontend,
-  encrypting TOTP secrets at rest (use a KMS-backed field when deploying).
+* Web dashboard: CORS only for configured origins (no credentials; exposes `retry-after`,
+  `content-disposition`), optional `WEB_IP_ALLOWLIST` for web roles (rangers, sync, safety and `/healthz/`
+  are never restricted). Reports are stored under `reports/<org>/` in the default storage and only
+  streamed through authenticated, tenant-scoped views; researcher/viewer reports are always anonymised.
+* Not included yet: encrypting TOTP secrets at rest (use a KMS-backed field when deploying).

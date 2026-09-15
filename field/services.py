@@ -341,6 +341,9 @@ def cancel_safety_alert(request, alert: SafetyAlert, note: str | None) -> Safety
     alert.resolved_at = timezone.now()
     alert.resolution_note = note or None
     alert.save(update_fields=["status", "resolved_at", "resolution_note", "updated_at"])
+    from .alerts import record_event
+
+    record_event(alert, "cancelled", actor=request.user, note=note or "", at=alert.resolved_at)
     audit(request, "safety_alert.cancel", target=alert, detail={"note": note or ""})
     notify_managers(alert.organisation_id, "PATROLIQ SOS CANCELLED",
                     f"{alert.ranger.full_name} cancelled the {alert.get_kind_display().lower()} alert (PIN verified).",

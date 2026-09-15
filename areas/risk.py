@@ -146,11 +146,16 @@ def score_area(area: Area, day: date, hour: int = 20) -> int:
         ]
         rows.append((cell, score, factors))
 
+    # One upsert statement per batch instead of a SELECT + UPDATE/INSERT per cell (fast over a remote DB).
+    from django.utils import timezone
+
+    now = timezone.now()
     with transaction.atomic():
-        for cell, score, factors in rows:
-            RiskScore.objects.update_or_create(
-                cell=cell, date=day,
-                defaults={"organisation_id": area.organisation_id, "area": area, "score": score,
-                          "level": level_for(score), "factors": factors},
-            )
+        RiskScore.objects.bulk_create(
+            [RiskScore(organisation_id=area.organisation_id, area=area, cell=cell, date=day, score=score,
+                       level=level_for(score), factors=factors, created_at=now, updated_at=now)
+             for cell, score, factors in rows],
+            update_conflicts=True, unique_fields=["cell", "date"],
+            update_fields=["score", "level", "factors", "updated_at", "area"], batch_size=500,
+        )
     return len(rows)
