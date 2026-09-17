@@ -162,8 +162,10 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT") or (BASE_DIR / "media"))
 
 # --- File storage (uploads + generated reports) ------------------------------------------------
-# Local filesystem under MEDIA_ROOT by default. When the Cloudflare R2 variables are all set, the
-# default storage becomes the S3-compatible R2 bucket (django-storages). Files are never served from
+# FILE_STORAGE = r2 | database | local. Default: r2 when the Cloudflare R2 variables are all set; otherwise
+# database on Render (its filesystem is wiped on every deploy/restart, which silently loses photos);
+# otherwise the local filesystem under MEDIA_ROOT. With r2 the default storage is the S3-compatible
+# R2 bucket (django-storages); with database files are rows in core.StoredFile. Files are never served from
 # public bucket URLs: every download goes through an authenticated, tenant-scoped API view that
 # streams the object (the bucket should stay private).
 R2_BUCKET = os.environ.get("R2_BUCKET", "").strip()
@@ -175,7 +177,15 @@ STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
     "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
 }
-if USE_R2:
+FILE_STORAGE = (os.environ.get("FILE_STORAGE", "").strip().lower()
+                or ("r2" if USE_R2 else "database" if os.environ.get("RENDER") else "local"))
+if FILE_STORAGE not in {"r2", "database", "local"}:
+    raise ImproperlyConfigured("FILE_STORAGE must be r2, database or local.")
+if FILE_STORAGE == "r2" and not USE_R2:
+    raise ImproperlyConfigured("FILE_STORAGE=r2 needs R2_BUCKET, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY.")
+if FILE_STORAGE == "database":
+    STORAGES["default"] = {"BACKEND": "core.storage.DatabaseStorage"}
+if FILE_STORAGE == "r2":
     STORAGES["default"] = {
         "BACKEND": "storages.backends.s3.S3Storage",
         "OPTIONS": {
@@ -198,6 +208,9 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
 # --- PATROLIQ auth policy -------------------------------------------------------------------
 RANGER_TOKEN_IDLE_HOURS = env_int("RANGER_TOKEN_IDLE_HOURS", 168)
 WEB_TOKEN_IDLE_HOURS = env_int("WEB_TOKEN_IDLE_HOURS", 8)
+# A ranger off patrol shows "online" on the dashboard when their phone reached the API within this many minutes
+# (idle phones sync every 30 min).
+RANGER_ONLINE_MINUTES = env_int("RANGER_ONLINE_MINUTES", 35)
 LOGIN_MAX_FAILURES = env_int("LOGIN_MAX_FAILURES", 5)
 LOGIN_LOCKOUT_MINUTES = env_int("LOGIN_LOCKOUT_MINUTES", 15)
 TOTP_ISSUER = os.environ.get("TOTP_ISSUER", "PATROLIQ")

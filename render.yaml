@@ -46,6 +46,8 @@ services:
       - key: WEB_IP_ALLOWLIST              # optional CIDRs for web roles; leave empty for no restriction
         sync: false
       # Uploads + generated reports in a private Cloudflare R2 bucket (local disk is ephemeral on Render)
+      - key: FILE_STORAGE                  # database (default on Render without R2) | r2 | local
+        value: database
       - key: R2_BUCKET
         sync: false
       - key: R2_ACCOUNT_ID

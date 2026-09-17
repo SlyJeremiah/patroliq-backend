@@ -11,18 +11,24 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
+from django.conf import settings
 from django.db.models import Avg, Count, Max, OuterRef, Q, Subquery
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 from rest_framework import serializers
 
-from accounts.models import User
+from accounts.models import AuthToken, User
 from areas.models import Area, Assignment, GrtsCell, RiskScore, Sector
 from core.roles import RANGER
 from field.alerts import alert_item, is_open, latest_dispatches, threat_alert_q
 from field.models import Observation, Patrol, PositionPing, SafetyAlert, TrackPoint
 
 ACTIVE_WINDOW = timedelta(minutes=15)
+
+
+def online_window() -> timedelta:
+    """Idle phones sync every 30 min, so any contact within this window counts as online."""
+    return timedelta(minutes=settings.RANGER_ONLINE_MINUTES)
 _dt = serializers.DateTimeField()
 
 
@@ -78,7 +84,11 @@ class RangerLive:
 
 
 def live_status(org, rangers: list[User], now=None) -> dict:
-    """Batch status computation: {ranger_id: RangerLive}. Precedence sos > paused > active > offline."""
+    """
+    Batch status computation: {ranger_id: RangerLive}. Precedence sos > paused > active > online > offline.
+    ``online``: no open patrol (or an open one gone quiet), but the phone reached the API recently (bootstrap sync,
+    position ping or any authenticated call).
+    """
     now = now or timezone.now()
     ids = [u.pk for u in rangers]
     latest_ping_ids = (User.objects.filter(pk__in=ids).annotate(
@@ -91,19 +101,24 @@ def live_status(org, rangers: list[User], now=None) -> dict:
         open_patrols[p.ranger_id] = p  # latest started wins
     sos = set(SafetyAlert.objects.for_org(org).filter(ranger_id__in=ids, status__in=["active", "acknowledged"])
               .values_list("ranger_id", flat=True))
+    last_call = dict(AuthToken.objects.filter(user_id__in=ids).values("user_id").annotate(t=Max("last_used_at"))
+                     .values_list("user_id", "t"))
     out = {}
     for u in rangers:
         ping, patrol = pings.get(u.pk), open_patrols.get(u.pk)
         last_activity = max([t for t in (ping.recorded_at if ping else None, u.last_sync_at) if t], default=None)
+        last_seen = max([t for t in (last_activity, last_call.get(u.pk)) if t], default=None)
         if u.pk in sos:
             status = "sos"
         elif patrol is not None and patrol.status == "paused":
             status = "paused"
         elif patrol is not None and last_activity is not None and now - last_activity <= ACTIVE_WINDOW:
             status = "active"
+        elif last_seen is not None and now - last_seen <= online_window():
+            status = "online"
         else:
             status = "offline"
-        out[u.pk] = RangerLive(u, status, ping, patrol, last_activity)
+        out[u.pk] = RangerLive(u, status, ping, patrol, last_seen)
     return out
 
 
@@ -379,7 +394,8 @@ def summary(org, area: Area | None = None) -> dict:
     return {
         "area_id": str(area_id) if area_id else None,
         "rangers_total": len(rangers),
-        "rangers_active": counts["active"], "rangers_paused": counts["paused"], "rangers_offline": counts["offline"],
+        "rangers_active": counts["active"], "rangers_paused": counts["paused"], "rangers_online": counts["online"],
+        "rangers_offline": counts["offline"],
         "rangers_sos": counts["sos"],
         "open_alerts": len(alerts),
         "critical_alerts": sum(1 for a in alerts if a["severity"] == "critical"),

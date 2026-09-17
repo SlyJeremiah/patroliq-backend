@@ -60,6 +60,34 @@ def ops():
             "other_mgr": client_for(make_user(other, "manager"))}
 
 
+def test_online_status_off_patrol(ops, settings):
+    from accounts.models import AuthToken
+
+    org, team, area = ops["org"], ops["team"], ops["area"]
+    now = timezone.now()
+    synced = make_user(org, "ranger", full_name="Synced Ranger", team=team, last_sync_at=now - timedelta(minutes=10))
+    caller = make_user(org, "ranger", full_name="Caller Ranger", team=team, last_sync_at=now - timedelta(days=2))
+    AuthToken.objects.create(user=caller, device_id="phone", last_used_at=now - timedelta(minutes=5))
+    stale = make_user(org, "ranger", full_name="Stale Ranger", team=team, last_sync_at=now - timedelta(minutes=50))
+    ended = Patrol.objects.create(client_uuid=new_uuid(), organisation=org, ranger=stale, team=team, area=area,
+                                  started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1), status="ended")
+    PositionPing.objects.create(organisation=org, ranger=synced, patrol_client_uuid=ended.pk,
+                                recorded_at=now - timedelta(hours=1), lat=-17.5, lon=30.95)
+
+    rangers = {r["full_name"]: r["status"] for r in ops["mgr"].get("/api/v1/rangers/").json()}
+    assert rangers["Synced Ranger"] == "online" and rangers["Caller Ranger"] == "online"
+    assert rangers["Stale Ranger"] == "offline" and rangers["Offline Ranger"] == "offline"
+    assert rangers["Active Ranger"] == "active"  # an open patrol with fresh pings still wins
+    body = ops["mgr"].get("/api/v1/dashboard/summary/").json()
+    assert (body["rangers_online"], body["rangers_offline"]) == (2, 2)
+    assert body["rangers_total"] == sum(body[k] for k in ("rangers_active", "rangers_paused", "rangers_online",
+                                                            "rangers_offline", "rangers_sos"))
+
+    settings.RANGER_ONLINE_MINUTES = 3
+    rangers = {r["full_name"]: r["status"] for r in ops["mgr"].get("/api/v1/rangers/").json()}
+    assert rangers["Synced Ranger"] == "offline" and rangers["Caller Ranger"] == "offline"
+
+
 def test_ranger_and_researcher_forbidden(ops):
     ranger = client_for(ops["r_active"])
     researcher = client_for(make_user(ops["org"], "researcher"))

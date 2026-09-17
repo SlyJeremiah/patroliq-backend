@@ -230,3 +230,34 @@ def test_gzip_request_body(field):
 def test_researcher_cannot_sync(field):
     r = client_for(make_user(field["org"], "researcher")).get("/api/v1/sync/bootstrap/")
     assert r.status_code == 403
+
+
+def test_media_in_database_storage(field, settings):
+    from django.core.files.uploadedfile import SimpleUploadedFile
+
+    from core.models import StoredFile
+
+    settings.STORAGES = {**settings.STORAGES, "default": {"BACKEND": "core.storage.DatabaseStorage"}}
+    obs_id = new_uuid()
+    field["client"].post("/api/v1/sync/push/", {"observations": [{
+        "client_uuid": obs_id, "area_id": str(field["area"].pk), "category": "wildlife", "lat": -17.5, "lon": 30.95,
+        "recorded_at": "2026-09-15T06:15:00Z"}]}, format="json")
+    jpeg = b"\xff\xd8\xff\xe0" + b"1" * 4096
+    f = SimpleUploadedFile("kudu.jpg", jpeg, content_type="image/jpeg")
+    r = field["client"].post("/api/v1/media/", {"file": f, "observation_client_uuid": obs_id, "kind": "photo"},
+                             format="multipart")
+    assert r.status_code == 201, r.content
+    stored = StoredFile.objects.get()
+    assert bytes(stored.content) == jpeg and stored.size == len(jpeg)
+    assert Media.objects.get().file.name == stored.name
+    download = field["client"].get(f"/api/v1/media/{r.json()['id']}/file/")
+    assert download.status_code == 200 and b"".join(download.streaming_content) == jpeg
+
+    manager = client_for(make_user(field["org"], "manager"))
+    listed = manager.get("/api/v1/observations/", {"area_id": str(field["area"].pk)}).json()
+    media = next(o for o in listed if o["client_uuid"] == obs_id)["media"]
+    assert len(media) == 1 and manager.get(f"/api/v1/media/{media[0]['id']}/file/").status_code == 200
+
+    StoredFile.objects.all().delete()
+    missing = manager.get(f"/api/v1/media/{media[0]['id']}/file/")
+    assert missing.status_code == 404 and missing.json()["error"]["code"] == "not_found"

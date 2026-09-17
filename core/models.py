@@ -69,3 +69,15 @@ class Tombstone(TenantModel):
         cls.objects.bulk_create(
             [cls(organisation_id=organisation_id, kind=kind, object_id=oid, area_id=area_id) for oid in object_ids]
         )
+
+
+class StoredFile(models.Model):
+    """Blob row for :class:`core.storage.DatabaseStorage` (``FILE_STORAGE=database``)."""
+
+    name = models.CharField(max_length=255, primary_key=True)
+    content = models.BinaryField()
+    size = models.PositiveBigIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
