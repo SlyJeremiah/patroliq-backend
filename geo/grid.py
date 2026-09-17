@@ -2,26 +2,35 @@
 GRTS grid generation and point -> cell lookup.
 
 Grid
-    Square cells of ``cell_size_m`` are laid out in the UTM zone of the boundary centroid, with the
-    origin snapped to a multiple of the cell size (so regenerating the same boundary yields the same
-    cells). Each square is clipped to the boundary; clipped pieces smaller than 10% of a full cell
+    Flat-topped hexagons are laid out in the UTM zone of the boundary centroid. ``cell_size_m`` is the
+    side of the equal-area square, so a full hexagon covers ``cell_size_m²`` (a "1 km" grid has 1 km²
+    cells) and its side is ``cell_size_m * sqrt(2 / (3 * sqrt(3)))``. Columns are ``1.5 * side`` apart
+    and rows ``sqrt(3) * side`` apart; odd columns are shifted half a row north ("odd-q" offset layout).
+    Column/row indices are absolute multiples of that spacing (so regenerating the same boundary yields
+    the same cells). Each hexagon is clipped to the boundary; clipped pieces smaller than 10% of a full cell
     ("slivers") are dropped. If clipping splits a cell into several parts, the largest part is kept
     (the contract models a cell as a single Polygon).
 
-GRTS reverse-hierarchical ordering (Stevens & Olsen 2004)
-    1. Cover the column/row index space of the kept cells (offset so the westernmost/southernmost
-       kept cell is 0) with a quadtree of ``L = ceil(log2(max(cols, rows)))`` levels. At level ``k`` (1 = coarsest) a cell falls in quadrant
-       ``q_k = bit_k(col) + 2 * bit_k(row)`` of its parent node.
-    2. Randomise: every quadtree node gets its own random permutation of the four quadrant digits
-       (seeded from ``seed``, the level and the node's position, so the result is deterministic and
-       independent of iteration order). The cell's hierarchical address is the sequence of permuted
-       digits ``d_1 d_2 … d_L`` (base 4).
-    3. Reverse: read the address backwards, i.e. ``value = Σ d_k · 4^(k-1)`` (the coarsest digit is
-       the least significant). Sorting cells by ``value`` interleaves quadrants at every scale, so any
-       prefix 1..n of the order is a spatially balanced sample — a ranger visiting cells in
-       ``grts_order`` covers the area evenly even if they stop early.
-    4. Cells kept after clipping are ranked 1..N by ``value`` → ``grts_order``; labels are
+GRTS ordering (after Stevens & Olsen 2004)
+    1. Hexagon columns are offset, so cells are addressed by the position of their centres: the extent
+       of the kept cell centres is scaled onto a ``2^L x 2^L`` index space (``L`` one level finer than
+       the kept cells' column/row span), covered by a quadtree of ``L`` levels. At level ``k``
+       (1 = coarsest) a cell falls in quadrant ``q_k = bit_k(col) + 2 * bit_k(row)`` of its parent node,
+       so the top-level split falls at the middle of the area.
+    2. Randomise: every quadtree node gets its own random permutation of its four quadrants (seeded
+       from ``seed``, the level and the node's position, so the result is deterministic and independent
+       of iteration order).
+    3. Reverse-hierarchical interleave: each node orders its cells by taking one cell from each
+       non-empty quadrant in turn (in the node's permuted order), recursively. Any prefix 1..n of the
+       order is therefore spread across the quadrants at every scale — a ranger visiting cells in
+       ``grts_order`` covers the area evenly even if they stop early. Unlike sorting by reversed
+       base-4 addresses, this stays balanced when clipping to an irregular boundary leaves quadtree
+       positions empty. Cells sharing a finest-level position are ordered by column, then row.
+    4. Cells kept after clipping are ranked 1..N in that order → ``grts_order``; labels are
        ``GRTS-001`` … in that order (zero padding widens beyond 999 cells).
+
+    ``grts_reverse_hierarchical_order`` (the classic address-reversal value for a complete grid) is kept
+    for reference and tests.
 
 Sectors
     Each cell is assigned to the nearest APU base (planar distance in UTM between cell centroid and
@@ -34,7 +43,7 @@ import random
 from dataclasses import dataclass
 from typing import Sequence
 
-from shapely.geometry import Point, Polygon, box
+from shapely.geometry import Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.prepared import prep
 
@@ -42,6 +51,12 @@ from .core import WGS84, GeoError, geojson_from_shape, reproject, to_local_metri
 
 SLIVER_FRACTION = 0.10
 MAX_CELLS = 20_000
+HEX_SIDE_PER_CELL_SIZE = math.sqrt(2 / (3 * math.sqrt(3)))
+
+
+def hexagon(cx: float, cy: float, side: float) -> Polygon:
+    """Flat-topped regular hexagon centred on (cx, cy), counter-clockwise from the east vertex."""
+    return Polygon([(cx + side * math.cos(math.radians(60 * i)), cy + side * math.sin(math.radians(60 * i))) for i in range(6)])
 
 
 @dataclass
@@ -87,6 +102,35 @@ def grts_reverse_hierarchical_order(indices: Sequence[tuple[int, int]], cols: in
     return values
 
 
+def grts_balanced_order(
+    indices: Sequence[tuple[int, int]], levels: int, seed: str, tiebreak: Sequence[tuple] | None = None,
+) -> list[int]:
+    """
+    Positions into ``indices`` in GRTS order (see module doc, step 3). ``indices`` are (col, row) in
+    ``[0, 2**levels)``; ``tiebreak`` orders items that share a finest-level position.
+    """
+    keys = tiebreak if tiebreak is not None else list(indices)
+
+    def order(items: list[int], level: int, pcol: int, prow: int) -> list[int]:
+        if level > levels or len(items) <= 1:
+            return sorted(items, key=lambda i: keys[i])
+        shift = levels - level
+        buckets: list[list[int]] = [[], [], [], []]
+        for i in items:
+            col, row = indices[i]
+            buckets[((col >> shift) & 1) + 2 * ((row >> shift) & 1)].append(i)
+        children = []
+        for q in _node_permutation(seed, level, pcol, prow):
+            if buckets[q]:
+                children.append(order(buckets[q], level + 1, pcol * 2 + (q & 1), prow * 2 + (q >> 1)))
+        out: list[int] = []
+        for j in range(max(len(ch) for ch in children)):
+            out.extend(ch[j] for ch in children if j < len(ch))
+        return out
+
+    return order(list(range(len(indices))), 1, 0, 0)
+
+
 def build_grid(
     boundary: BaseGeometry,
     cell_size_m: int,
@@ -98,25 +142,26 @@ def build_grid(
         raise GeoError("cell_size_m must be at least 50.", code="validation_error")
     metric, crs = to_local_metric(boundary)
     minx, miny, maxx, maxy = metric.bounds
-    x0 = math.floor(minx / cell_size_m) * cell_size_m
-    y0 = math.floor(miny / cell_size_m) * cell_size_m
-    cols = max(1, math.ceil((maxx - x0) / cell_size_m))
-    rows = max(1, math.ceil((maxy - y0) / cell_size_m))
-    if cols * rows > MAX_CELLS * 4:
+    side = cell_size_m * HEX_SIDE_PER_CELL_SIZE
+    dx, dy = 1.5 * side, math.sqrt(3) * side
+    # One extra column/row each way so hexagons overlapping the bounds edge are included.
+    c_from, c_to = math.floor(minx / dx) - 1, math.ceil(maxx / dx) + 1
+    r_from, r_to = math.floor(miny / dy) - 1, math.ceil(maxy / dy) + 1
+    if (c_to - c_from + 1) * (r_to - r_from + 1) > MAX_CELLS * 4:
         raise GeoError("Grid too large for this cell size; choose a larger cell_size_m.", code="grid_too_large")
 
     prepared = prep(metric)
     full_area = float(cell_size_m * cell_size_m)
     kept: list[tuple[int, int, Polygon]] = []
-    for c in range(cols):
-        for r in range(rows):
-            square = box(x0 + c * cell_size_m, y0 + r * cell_size_m, x0 + (c + 1) * cell_size_m, y0 + (r + 1) * cell_size_m)
-            if not prepared.intersects(square):
+    for c in range(c_from, c_to + 1):
+        for r in range(r_from, r_to + 1):
+            cell = hexagon(c * dx, (r + 0.5 * (c % 2)) * dy, side)
+            if not prepared.intersects(cell):
                 continue
-            if prepared.contains(square):
-                piece = square
+            if prepared.contains(cell):
+                piece = cell
             else:
-                clipped = metric.intersection(square)
+                clipped = metric.intersection(cell)
                 parts = [g for g in getattr(clipped, "geoms", [clipped]) if isinstance(g, Polygon) and g.area > 0]
                 if not parts:
                     continue
@@ -129,13 +174,19 @@ def build_grid(
     if len(kept) > MAX_CELLS:
         raise GeoError("Grid too large for this cell size; choose a larger cell_size_m.", code="grid_too_large")
 
-    # Build the quadtree over the extent of the cells actually kept (not the snapped bounding grid),
-    # so the top-level split matches the area and early samples are balanced across it.
-    cmin, rmin = min(c for c, _, _ in kept), min(r for _, r, _ in kept)
-    span_c = max(c for c, _, _ in kept) - cmin + 1
-    span_r = max(r for _, r, _ in kept) - rmin + 1
-    values = grts_reverse_hierarchical_order([(c - cmin, r - rmin) for c, r, _ in kept], span_c, span_r, seed)
-    order = sorted(range(len(kept)), key=lambda i: values[i])
+    span_c = max(c for c, _, _ in kept) - min(c for c, _, _ in kept) + 1
+    span_r = max(r for _, r, _ in kept) - min(r for _, r, _ in kept) + 1
+    levels = _quadtree_levels(span_c, span_r) + 1
+    res = 2 ** levels
+    centres = [(c * dx, (r + 0.5 * (c % 2)) * dy) for c, r, _ in kept]
+    xmin, xmax = min(x for x, _ in centres), max(x for x, _ in centres)
+    ymin, ymax = min(y for _, y in centres), max(y for _, y in centres)
+
+    def scaled(v: float, lo: float, hi: float) -> int:
+        return 0 if hi <= lo else min(res - 1, int((v - lo) / (hi - lo) * res))
+
+    idx = [(scaled(x, xmin, xmax), scaled(y, ymin, ymax)) for x, y in centres]
+    order = grts_balanced_order(idx, levels, seed, tiebreak=[(c, r) for c, r, _ in kept])
     width = max(3, len(str(len(kept))))
 
     bases_metric = [reproject(Point(lon, lat), WGS84, crs) for lon, lat in base_points]

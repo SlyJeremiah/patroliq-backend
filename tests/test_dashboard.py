@@ -167,7 +167,7 @@ def test_risk_map_and_trend_shape(ops):
     body = ops["mgr"].get(f"/api/v1/areas/{area.pk}/risk/").json()
     assert body["date"] == today.isoformat() and body["engine"] == "heuristic"
     assert body["model_confidence"] in {"low", "moderate", "high"}
-    assert len(body["cells"]) == 20
+    assert len(body["cells"]) == 24
     cell = body["cells"][0]
     assert set(cell) >= {"cell_id", "label", "sector_id", "score", "level", "factors", "centroid"}
     assert cell["centroid"]["type"] == "Point" and cell["factors"][0]["key"]
@@ -226,21 +226,21 @@ def test_coverage_status_computation_and_export():
     assert status[cells[2].label]["status"] == "pending" and status[cells[2].label]["last_visit_at"].startswith("2026-07-20")
     assert status[cells[3].label]["status"] == "partial" and status[cells[3].label]["observations"] == 1
     assert status[cells[4].label]["status"] == "never" and status[cells[4].label]["last_visit_at"] is None
-    assert body["coverage_pct"] == round(1 / 20, 4) and body["never_surveyed"] == 16
-    assert body["mean_visits"] == round(4 / 20, 2)
-    assert body["season_coverage_pct"] == round(4 / 20, 4)  # dry season May–Aug: cells 0–3
+    assert body["coverage_pct"] == round(1 / 24, 4) and body["never_surveyed"] == 20
+    assert body["mean_visits"] == round(4 / 24, 2)
+    assert body["season_coverage_pct"] == round(4 / 24, 4)  # dry season May–Aug: cells 0–3
     sector = body["sectors"][0]
-    assert (sector["cells"], sector["complete"], sector["partial"], sector["pending"], sector["never"]) == (20, 1, 2, 1, 16)
+    assert (sector["cells"], sector["complete"], sector["partial"], sector["pending"], sector["never"]) == (24, 1, 2, 1, 20)
     assert body["cells"][0]["status"] in {"complete", "partial", "pending", "never"}
     assert manager.get(f"/api/v1/areas/{area.pk}/coverage/", {"month": "2026-08", "visit_target": 1}).json()["coverage_pct"] \
-        == round(3 / 20, 4)
+        == round(3 / 24, 4)
     assert manager.get(f"/api/v1/areas/{area.pk}/coverage/", {"month": "Aug"}).status_code == 400
 
     r = manager.get(f"/api/v1/areas/{area.pk}/coverage/export/", {"month": "2026-08"})
     assert r.status_code == 200 and r["Content-Type"].startswith("text/csv")
     assert r["Content-Disposition"].startswith("attachment;") and "2026-08" in r["Content-Disposition"]
     rows = list(csv.DictReader(io.StringIO(r.content.decode("utf-8"))))
-    assert len(rows) == 20 and {row["cell_label"]: row["status"] for row in rows}[cells[0].label] == "complete"
+    assert len(rows) == 24 and {row["cell_label"]: row["status"] for row in rows}[cells[0].label] == "complete"
 
 
 def test_dispatch_notifies_responders_and_builds_timeline(ops):
@@ -288,8 +288,8 @@ def test_grid_dry_run_does_not_save():
     r = admin.post(f"/api/v1/areas/{area.pk}/grid/generate/", {"cell_size_m": 1000, "dry_run": True}, format="json")
     assert r.status_code == 200, r.content
     body = r.json()
-    assert body["cells_created"] == 20 and body["sectors_created"] == 1
-    assert body["cells"]["type"] == "FeatureCollection" and len(body["cells"]["features"]) == 20
+    assert body["cells_created"] == 24 and body["sectors_created"] == 1
+    assert body["cells"]["type"] == "FeatureCollection" and len(body["cells"]["features"]) == 24
     feat = body["cells"]["features"][0]
     assert feat["geometry"]["type"] == "Polygon" and feat["properties"]["label"] == "GRTS-001"
     assert GrtsCell.objects.filter(area=area).count() == 0 and not area.sectors.exists()
@@ -300,8 +300,8 @@ def test_grid_dry_run_does_not_save():
     Observation.objects.create(client_uuid=new_uuid(), organisation=org, area=area, observer=make_user(org, "ranger"),
                                category="other", lat=lat, lon=lon, cell=cell, recorded_at=timezone.now())
     r = admin.post(f"/api/v1/areas/{area.pk}/grid/generate/", {"cell_size_m": 500, "dry_run": True}, format="json")
-    assert r.status_code == 200 and r.json()["cells_created"] == 80
-    assert GrtsCell.objects.filter(area=area).count() == 20
+    assert r.status_code == 200 and r.json()["cells_created"] == 100
+    assert GrtsCell.objects.filter(area=area).count() == 24
 
 
 def test_area_setup_counters_and_cells_geojson():
@@ -312,12 +312,12 @@ def test_area_setup_counters_and_cells_geojson():
     c = client_for(make_user(org, "manager"))
     items = {a["id"]: a for a in c.get("/api/v1/areas/").json()}
     a = items[str(area.pk)]
-    assert (a["apu_base_count"], a["cell_count"], a["team_count"], a["sector_count"]) == (1, 20, 1, 1)
+    assert (a["apu_base_count"], a["cell_count"], a["team_count"], a["sector_count"]) == (1, 24, 1, 1)
     assert a["setup"] == {"boundary": True, "bases": True, "grid": True, "teams": True}
     assert items[str(draft.pk)]["setup"] == {"boundary": True, "bases": False, "grid": False, "teams": False}
-    assert c.get(f"/api/v1/areas/{area.pk}/").json()["cell_count"] == 20
+    assert c.get(f"/api/v1/areas/{area.pk}/").json()["cell_count"] == 24
     fc = c.get(f"/api/v1/areas/{area.pk}/cells/").json()
-    assert fc["type"] == "FeatureCollection" and len(fc["features"]) == 20
+    assert fc["type"] == "FeatureCollection" and len(fc["features"]) == 24
     assert set(fc["features"][0]["properties"]) >= {"id", "label", "grts_order", "sector_id"}
 
 

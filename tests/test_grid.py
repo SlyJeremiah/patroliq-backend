@@ -22,19 +22,31 @@ def test_grid_counts_labels_and_sectors():
 
     r = c.post(f"/api/v1/areas/{area.pk}/grid/generate/", {"cell_size_m": 1000}, format="json")
     assert r.status_code == 200, r.content
-    assert r.json() == {"cells_created": 20, "sectors_created": 2}
+    n = r.json()["cells_created"]
+    assert r.json()["sectors_created"] == 2 and 20 <= n <= 35
 
     fc = c.get(f"/api/v1/areas/{area.pk}/cells/").json()
     assert fc["type"] == "FeatureCollection"
     cells = [{**f["properties"], "geometry": f["geometry"]} for f in fc["features"]]
-    assert len(cells) == 20
-    assert [x["grts_order"] for x in cells] == list(range(1, 21))
-    assert [x["label"] for x in cells] == [f"GRTS-{i:03d}" for i in range(1, 21)]
+    assert len(cells) == n
+    assert [x["grts_order"] for x in cells] == list(range(1, n + 1))
+    assert [x["label"] for x in cells] == [f"GRTS-{i:03d}" for i in range(1, n + 1)]
+    full = 0
     for cell in cells:
         poly = shape(cell["geometry"])
         assert poly.geom_type == "Polygon"
-        assert geo.area_km2(poly) == pytest.approx(1.0, rel=0.01)
+        km2 = geo.area_km2(poly)
+        assert 0.1 * 0.99 <= km2 <= 1.0 * 1.01  # full hexagon = 1 km²; edge pieces clipped, slivers dropped
+        if km2 == pytest.approx(1.0, rel=0.01):
+            full += 1
+            assert len(poly.exterior.coords) == 7  # hexagon
         assert boundary.buffer(1e-5).covers(poly)  # ~1 m tolerance: UTM vs lon/lat edge curvature
+    assert full >= 6
+    union = shape(cells[0]["geometry"])
+    for cell in cells[1:]:
+        union = union.union(shape(cell["geometry"]))
+    assert geo.area_km2(union) == pytest.approx(sum(geo.area_km2(shape(x["geometry"])) for x in cells), rel=1e-3)  # no overlaps
+    assert geo.area_km2(union) >= 0.95 * geo.area_km2(boundary)  # only slivers left uncovered
 
     sectors = {s["id"]: s for s in c.get(f"/api/v1/areas/{area.pk}/sectors/").json()}
     assert len(sectors) == 2
@@ -49,7 +61,7 @@ def test_grts_order_is_spatially_balanced():
     org = make_org()
     area = make_area(org, boundary=utm_square(30.95, -17.50, 4, 4), grid=True)
     cells = list(GrtsCell.objects.filter(area=area).order_by("grts_order"))
-    assert len(cells) == 16
+    assert len(cells) >= 16
     c = shape(area.boundary).centroid
     quadrants = {(cell.centroid["coordinates"][0] > c.x, cell.centroid["coordinates"][1] > c.y) for cell in cells[:4]}
     assert len(quadrants) == 4  # first four samples hit all four quadrants
@@ -64,6 +76,15 @@ def test_grts_ordering_is_deterministic_and_unique():
     assert a != other
 
 
+def test_balanced_order_interleaves_quadrants_with_gaps():
+    # An L-shaped set (one quadrant empty at the top level): the first three picks hit the three occupied quadrants.
+    idx = [(c, r) for c in range(8) for r in range(8) if not (c >= 4 and r >= 4)]
+    order = geo.grts_balanced_order(idx, 3, "seed-1")
+    assert sorted(order) == list(range(len(idx)))
+    assert order == geo.grts_balanced_order(idx, 3, "seed-1")
+    assert len({(idx[i][0] >= 4, idx[i][1] >= 4) for i in order[:3]}) == 3
+
+
 def test_slivers_dropped_and_single_sector_without_bases():
     org = make_org()
     # 3.05 km wide: the extra 50 m strip (5% of a cell) must not become cells.
@@ -72,7 +93,8 @@ def test_slivers_dropped_and_single_sector_without_bases():
     area = make_area(org, boundary=square, bases=[], grid=False, status="draft")
     from areas.services import generate_grid
 
-    assert generate_grid(area, 1000) == {"cells_created": 9, "sectors_created": 1}
+    first = generate_grid(area, 1000)
+    assert first["sectors_created"] == 1 and first["cells_created"] >= 9
     assert Sector.objects.get(area=area).apu_base is None
 
     lon_per_m = (maxx - minx) / 3000
@@ -81,7 +103,7 @@ def test_slivers_dropped_and_single_sector_without_bases():
                                                    (maxx + 50 * lon_per_m, maxy), (maxx, maxy), (maxx, miny)]]})))
     area.boundary = geo.geojson_from_shape(strip)
     area.save()
-    assert generate_grid(area, 1000, force=True)["cells_created"] == 9
+    assert generate_grid(area, 1000, force=True)["cells_created"] == first["cells_created"]
 
 
 def test_regenerate_refused_when_observations_reference_cells_unless_force():
@@ -96,9 +118,27 @@ def test_regenerate_refused_when_observations_reference_cells_unless_force():
     r = c.post(f"/api/v1/areas/{area.pk}/grid/generate/", {"cell_size_m": 500}, format="json")
     assert r.status_code == 409 and r.json()["error"]["code"] == "grid_in_use"
     r = c.post(f"/api/v1/areas/{area.pk}/grid/generate/", {"cell_size_m": 500, "force": True}, format="json")
-    assert r.status_code == 200 and r.json()["cells_created"] == 80
+    assert r.status_code == 200 and r.json()["cells_created"] >= 80
     obs.refresh_from_db()
     assert obs.cell is not None and obs.cell.area_id == area.pk and shape(obs.cell.geometry).covers(Point(lon, lat))
+
+
+def test_regenerate_keeps_team_assignments_on_the_same_ground():
+    from areas.models import Assignment, Team
+    from areas.services import generate_grid
+
+    org = make_org()
+    area = make_area(org)
+    old = list(GrtsCell.objects.filter(area=area).order_by("grts_order")[:3])
+    team = Team.objects.create(organisation=org, area=area, name="Alpha")
+    assignment = Assignment.objects.create(organisation=org, team=team, area=area, date="2026-09-17")
+    assignment.cells.set(old)
+    ground = [shape(c.geometry) for c in old]
+
+    generate_grid(area, 500, force=True)
+    kept = list(assignment.cells.all())
+    assert kept and all(c.area_id == area.pk for c in kept)
+    assert all(any(g.covers(shape(c.centroid)) for g in ground) for c in kept)
 
 
 def test_activation_requires_boundary_base_and_grid():

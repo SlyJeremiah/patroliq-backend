@@ -323,7 +323,7 @@ audit log additionally has an UPDATE/DELETE/TRUNCATE-blocking trigger and no UPD
 Spatial data is GeoJSON in JSON columns and every spatial operation lives in `geo/` (see the
 docstring in `geo/__init__.py`). When GDAL is available: switch to the PostGIS engine, add geometry
 columns alongside the JSON ones and backfill, re-implement the `geo` functions with `ST_Covers`,
-`ST_Area(geography)`, `ST_Distance`, `ST_Transform` and `ST_SquareGrid` (GRTS ordering stays in
+`ST_Area(geography)`, `ST_Distance`, `ST_Transform` and `ST_HexagonGrid` (GRTS ordering stays in
 Python), keep serialising GeoJSON so the API contract is unchanged, then drop the JSON columns.
 
 ## Security notes

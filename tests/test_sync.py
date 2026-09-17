@@ -44,7 +44,7 @@ def test_bootstrap_contents(field):
     area = body["areas"][0]
     assert area["boundary"]["type"] == "MultiPolygon" and area["updated_at"].endswith("Z")
     assert len(body["apu_bases"]) == 1 and body["apu_bases"][0]["location"]["type"] == "Point"
-    assert len(body["cells"]) == 20 and len(body["sectors"]) == 1
+    assert len(body["cells"]) == 24 and len(body["sectors"]) == 1
     assert {"id", "area_id", "sector_id", "label", "grts_order", "geometry", "centroid", "updated_at"} <= set(body["cells"][0])
     assert len(body["assignments"]) == 1
     assert sorted(body["assignments"][0]["cell_ids"]) == sorted(str(c.pk) for c in field["cells"])

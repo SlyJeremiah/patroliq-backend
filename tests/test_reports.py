@@ -81,7 +81,7 @@ def test_summary_csv_geojson_and_audit(rep):
     r = rep["mgr"].post("/api/v1/reports/", body(rep, format="csv", type="incident_report"), format="json").json()
     s = r["summary"]
     assert (s["patrols"], s["observations"], s["high_severity_incidents"]) == (1, 2, 1)
-    assert s["distance_km"] == 8.2 and s["grts_coverage_pct"] == round(4 / 20, 4)
+    assert s["distance_km"] == 8.2 and s["grts_coverage_pct"] == round(4 / 24, 4)
     assert s["species"] == [{"name": "African Savanna Elephant", "count": 6}]
     assert {"week", "observations"} == set(s["by_week"][0]) and isinstance(s["risk_trend"], list)
     _, data = download(rep["mgr"], r)

@@ -7,7 +7,7 @@ import geo
 from core.exceptions import ApiError
 from core.models import Tombstone
 
-from .models import ApuBase, Area, GrtsCell, Sector
+from .models import ApuBase, Area, Assignment, GrtsCell, Sector
 
 
 def geo_api_error(exc: geo.GeoError) -> ApiError:
@@ -94,6 +94,13 @@ def generate_grid(area: Area, cell_size_m: int | None = None, force: bool = Fals
     bases, cells = _build_cells(area, cell_size_m, seed)
 
     old_cell_ids = list(GrtsCell.objects.filter(area=area).values_list("pk", flat=True))
+    # Team assignments point at cells that are about to be deleted: remember the ground they covered.
+    assigned = {}
+    if old_cell_ids:
+        for a in Assignment.objects.filter(area=area).prefetch_related("cells"):
+            shapes = [geo.shape_from_geojson(c.geometry) for c in a.cells.all()]
+            if shapes:
+                assigned[a] = shapes
     old_sector_ids = list(Sector.objects.filter(area=area).values_list("pk", flat=True))
     GrtsCell.objects.filter(area=area).delete()  # observations/track points: cell -> NULL; risk scores cascade
     Sector.objects.filter(area=area).delete()
@@ -117,6 +124,12 @@ def generate_grid(area: Area, cell_size_m: int | None = None, force: bool = Fals
     ])
     area.grid_cell_size_m = cell_size_m
     area.save(update_fields=["grid_cell_size_m", "updated_at"])
+
+    if assigned:
+        new_cells = [(c.pk, geo.shape_from_geojson(c.centroid)) for c in GrtsCell.objects.filter(area=area)]
+        for assignment, shapes in assigned.items():
+            # A new cell stays assigned when its centre lies in one of the team's old cells.
+            assignment.cells.set([pk for pk, centre in new_cells if any(sh.covers(centre) for sh in shapes)])
 
     if old_cell_ids:
         reassign_cells(area)

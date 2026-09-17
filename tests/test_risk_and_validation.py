@@ -14,9 +14,9 @@ pytestmark = pytest.mark.django_db
 def test_risk_scores_without_optional_layers_renormalise():
     org = make_org()
     area = make_area(org)
-    assert score_area(area, date(2026, 9, 15)) == 20
+    assert score_area(area, date(2026, 9, 15)) == 24
     scores = list(RiskScore.objects.filter(area=area))
-    assert len(scores) == 20
+    assert len(scores) == 24
     for s in scores:
         assert 0 <= s.score <= 10 and s.level == level_for(s.score)
         keys = {f["key"] for f in s.factors}

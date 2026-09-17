@@ -15,7 +15,7 @@ Public API (import from ``geo``):
     utm_crs_for, reproject, transformer         — CRS handling
     point_in_geometry, distance_to_boundary_m, distance_to_geometry_m
     haversine_m, path_length_m
-    build_grid, grts_reverse_hierarchical_order — GRTS grid generation (see geo.grid)
+    build_grid, grts_balanced_order, grts_reverse_hierarchical_order — GRTS hexagon grid generation (see geo.grid)
     CellIndex                                   — fast point -> cell lookup
     read_boundary_file                          — shapefile zip / GeoJSON / KML import (geo.importers)
 
@@ -29,7 +29,7 @@ Migration path to PostGIS / GeoDjango (when GDAL is available in production):
          point_in_geometry     -> ``ST_Covers`` / ``cells.filter(geometry__covers=pt)``
          area_km2              -> ``ST_Area(geom::geography) / 1e6``
          distance_*_m          -> ``ST_Distance(geography)``
-         build_grid clipping   -> ``ST_SquareGrid`` + ``ST_Intersection`` (ordering stays in Python)
+         build_grid clipping   -> ``ST_HexagonGrid`` + ``ST_Intersection`` (ordering stays in Python)
          reproject             -> ``ST_Transform``
     4. Keep the GeoJSON columns (or serialise from geometry) so the API contract does not change,
        then drop them once the Android app no longer depends on the JSON representation.
@@ -52,5 +52,5 @@ from .core import (  # noqa: F401
     transformer,
     utm_crs_for,
 )
-from .grid import CellIndex, build_grid, grts_reverse_hierarchical_order  # noqa: F401
+from .grid import CellIndex, build_grid, grts_balanced_order, grts_reverse_hierarchical_order  # noqa: F401
 from .importers import BoundaryImport, read_boundary_file  # noqa: F401
