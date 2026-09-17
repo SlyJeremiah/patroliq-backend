@@ -202,6 +202,10 @@ LOGIN_MAX_FAILURES = env_int("LOGIN_MAX_FAILURES", 5)
 LOGIN_LOCKOUT_MINUTES = env_int("LOGIN_LOCKOUT_MINUTES", 15)
 TOTP_ISSUER = os.environ.get("TOTP_ISSUER", "PATROLIQ")
 
+# Two-factor sign-in (TOTP) for managers, org admins and platform admins (PRD 6.1 / 7.3). On by default.
+# WEB_TOTP_REQUIRED=false accepts email + password only (demos, pilots). Not recommended in production.
+WEB_TOTP_REQUIRED = env_bool("WEB_TOTP_REQUIRED", True)
+
 NOTIFY_BACKEND = os.environ.get("NOTIFY_BACKEND", "console")
 
 # --- Web dashboard: CORS + network ---------------------------------------------------------------

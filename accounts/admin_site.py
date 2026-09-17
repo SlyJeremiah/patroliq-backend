@@ -1,4 +1,5 @@
 from django import forms
+from django.conf import settings
 from django.contrib import admin
 from django.contrib.admin.forms import AdminAuthenticationForm
 
@@ -8,7 +9,7 @@ from .security import clear_failures, lockout_remaining, register_failure, verif
 class TOTPAdminAuthenticationForm(AdminAuthenticationForm):
     """Email + password + TOTP, with the same lockout as the API. Only superusers may enter."""
 
-    totp = forms.CharField(label="Authenticator code", max_length=10, required=True)
+    totp = forms.CharField(label="Authenticator code", max_length=10, required=False)
 
     def clean(self):
         identifier = web_identifier(self.data.get("username", ""))
@@ -20,7 +21,8 @@ class TOTPAdminAuthenticationForm(AdminAuthenticationForm):
             register_failure(identifier)
             raise
         user = self.get_user()
-        if not user.is_superuser or not verify_totp(user, self.cleaned_data.get("totp", "")):
+        totp_ok = not settings.WEB_TOTP_REQUIRED or verify_totp(user, self.cleaned_data.get("totp", ""))
+        if not user.is_superuser or not totp_ok:
             register_failure(identifier)
             raise forms.ValidationError("Invalid authenticator code.", code="invalid_totp")
         clear_failures(identifier)

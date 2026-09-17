@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from django.conf import settings
+
 import secrets
 
 from django.contrib.auth.hashers import make_password
@@ -98,7 +100,7 @@ class LoginView(APIView):
         if not user.is_active:
             raise ApiError(403, "account_disabled", "This account has been deactivated.")
 
-        if user.role in TOTP_ROLES:
+        if settings.WEB_TOTP_REQUIRED and user.role in TOTP_ROLES:
             if not data.get("totp"):
                 raise ApiError(401, "totp_required", "A TOTP code from your authenticator app is required.")
             if not user.totp_secret:

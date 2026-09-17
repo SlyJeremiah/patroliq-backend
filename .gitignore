@@ -30,3 +30,9 @@ logs/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local dashboard dev helper (TOTP secrets of seeded demo users)
+.dev_totp.json
+supabase-old-prototype-backup.json
+.live_totp.json
+totp_code.py

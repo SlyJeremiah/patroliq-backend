@@ -118,3 +118,18 @@ def test_unauthenticated_request_uses_error_envelope():
     r = client_for().get("/api/v1/areas/")
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "not_authenticated"
+
+
+def test_totp_can_be_switched_off(settings):
+    settings.WEB_TOTP_REQUIRED = False
+    org = make_org()
+    make_user(org, "manager", email="grace@example.org", password="manager123")
+    c = client_for()
+    r = c.post(LOGIN, {"email": "grace@example.org", "password": "manager123"}, format="json")
+    assert r.status_code == 200 and r.json()["token"]
+    # A stray code is ignored rather than rejected.
+    r = c.post(LOGIN, {"email": "grace@example.org", "password": "manager123", "totp": "000000"}, format="json")
+    assert r.status_code == 200
+    # The password is still checked.
+    r = c.post(LOGIN, {"email": "grace@example.org", "password": "wrong-password"}, format="json")
+    assert r.status_code == 401 and r.json()["error"]["code"] == "invalid_credentials"

@@ -28,6 +28,8 @@ services:
         value: "true"
       - key: DJANGO_HSTS_SECONDS
         value: "31536000"
+      - key: WEB_TOTP_REQUIRED             # false = email + password only for web sign-in (not recommended)
+        value: "true"
       - key: TRUSTED_PROXY_COUNT           # Render's load balancer appends the client IP to X-Forwarded-For
         value: "1"
       - key: DATABASE_URL                  # Neon pooled URL (host contains -pooler)
