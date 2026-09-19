@@ -52,6 +52,7 @@ urlpatterns = [
     path("positions/history/", field_views.PositionHistoryView.as_view(), name="positions-history"),
     path("areas/<uuid:pk>/risk/", dashboard_views.AreaRiskView.as_view(), name="area-risk"),
     path("areas/<uuid:pk>/risk/trend/", dashboard_views.AreaRiskTrendView.as_view(), name="area-risk-trend"),
+    path("areas/<uuid:pk>/heatmap/", dashboard_views.AreaHeatmapView.as_view(), name="area-heatmap"),
     path("areas/<uuid:pk>/coverage/", dashboard_views.AreaCoverageView.as_view(), name="area-coverage"),
     path("areas/<uuid:pk>/coverage/export/", dashboard_views.AreaCoverageExportView.as_view(), name="area-coverage-export"),
     path("reports/", dashboard_views.ReportListCreateView.as_view(), name="reports"),

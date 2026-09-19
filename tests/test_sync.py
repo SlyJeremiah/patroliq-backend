@@ -26,7 +26,6 @@ def field():
     cells = list(GrtsCell.objects.filter(area=area).order_by("grts_order")[:5])
     assignment = Assignment.objects.create(organisation=org, team=team, area=area, date=timezone.now().date())
     assignment.cells.set(cells)
-    Species.objects.create(common_name="Lion", scientific_name="Panthera leo", iucn_status="VU")
     make_user(org, "manager")
     return {"org": org, "area": area, "draft": draft, "ranger": ranger, "buddy": buddy, "team": team,
             "cells": cells, "assignment": assignment, "client": client_for(ranger)}
@@ -48,7 +47,10 @@ def test_bootstrap_contents(field):
     assert {"id", "area_id", "sector_id", "label", "grts_order", "geometry", "centroid", "updated_at"} <= set(body["cells"][0])
     assert len(body["assignments"]) == 1
     assert sorted(body["assignments"][0]["cell_ids"]) == sorted(str(c.pk) for c in field["cells"])
-    assert body["species"][0]["common_name"] == "Lion"
+    # the v1.5 catalogue migration seeds every database, so the species list is always populated
+    species = {s["common_name"]: s for s in body["species"]}
+    assert len(species) >= 150 and Species.objects.get(scientific_name="Panthera leo").common_name in species
+    assert species["Lion"]["taxon_group"] == "mammal" and species["Nile Crocodile"]["taxon_group"] == "reptile"
     assert {m["employee_id"] for m in body["team_members"]} == {"RGR-2026-041", "RGR-2026-038"}
     assert set(body["team_members"][0]) == {"id", "full_name", "employee_id", "role"}
     assert body["licence"]["plan"] == "standard"

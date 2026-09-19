@@ -31,6 +31,10 @@ class UserAdmin(BaseUserAdmin):
     fieldsets = (
         (None, {"fields": ("organisation", "role", "full_name", "employee_id", "email", "password")}),
         ("Profile", {"fields": ("phone", "language", "areas", "apu_base", "team")}),
+        ("Personal details", {"classes": ("collapse",), "fields": (
+            "first_name", "surname", "national_id", "date_of_birth", "home_address", "next_of_kin_name",
+            "next_of_kin_relationship", "next_of_kin_phone", "next_of_kin_address", "date_joined_org",
+            "rank", "post", "certificates")}),
         ("Security", {"fields": ("is_active", "is_staff", "is_superuser", "must_change_password", "totp_secret",
                                  "totp_last_step", "last_login", "last_sync_at")}),
     )

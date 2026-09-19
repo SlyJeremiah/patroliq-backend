@@ -15,6 +15,14 @@ from core.roles import PLATFORM_ADMIN, RANGER, ROLE_CHOICES
 
 MODULE_CHOICES = ["ai_risk", "species_id", "voice", "collars", "reports", "grts"]
 
+#: Personal-detail fields (spec v1.5 §B). The ``profile`` object of ``rangers/{id}/`` is exactly
+#: these keys, in this order.
+PERSONAL_FIELDS = [
+    "first_name", "surname", "national_id", "date_of_birth", "home_address", "next_of_kin_name",
+    "next_of_kin_relationship", "next_of_kin_phone", "next_of_kin_address", "date_joined_org",
+    "rank", "post", "certificates",
+]
+
 
 class Organisation(UUIDModel, TimeStampedModel):
     STATUS_CHOICES = [("active", "Active"), ("grace", "Grace"), ("suspended", "Suspended")]
@@ -98,6 +106,22 @@ class User(UUIDModel, AbstractBaseUser, PermissionsMixin):
     areas = models.ManyToManyField("areas.Area", blank=True, related_name="users")
     apu_base = models.ForeignKey("areas.ApuBase", null=True, blank=True, on_delete=models.SET_NULL, related_name="users")
     team = models.ForeignKey("areas.Team", null=True, blank=True, on_delete=models.SET_NULL, related_name="members")
+
+    # Personal details (spec v1.5 §B). Personal data: exposed ONLY through ``users/`` and the
+    # ``profile`` object of ``rangers/{id}/`` — never in auth/me/bootstrap/rangers-list/alerts/reports.
+    first_name = models.CharField(max_length=100, blank=True, default="")
+    surname = models.CharField(max_length=100, blank=True, default="")
+    national_id = models.CharField(max_length=32, blank=True, default="")
+    date_of_birth = models.DateField(null=True, blank=True)
+    home_address = models.CharField(max_length=300, blank=True, default="")
+    next_of_kin_name = models.CharField(max_length=200, blank=True, default="")
+    next_of_kin_relationship = models.CharField(max_length=60, blank=True, default="")
+    next_of_kin_phone = models.CharField(max_length=32, blank=True, default="")
+    next_of_kin_address = models.CharField(max_length=300, blank=True, default="")
+    date_joined_org = models.DateField(null=True, blank=True)
+    rank = models.CharField(max_length=60, blank=True, default="")
+    post = models.CharField(max_length=100, blank=True, default="")
+    certificates = models.TextField(max_length=1000, blank=True, default="")
 
     # TOTP (RFC 6238). The secret is shown once at creation/seed; stored server-side only.
     totp_secret = models.CharField(max_length=64, blank=True, default="")

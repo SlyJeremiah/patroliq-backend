@@ -99,7 +99,9 @@ def live_status(org, rangers: list[User], now=None) -> dict:
     open_patrols: dict = {}
     for p in Patrol.objects.for_org(org).filter(ranger_id__in=ids, status__in=["active", "paused"]).order_by("started_at"):
         open_patrols[p.ranger_id] = p  # latest started wins
-    sos = set(SafetyAlert.objects.for_org(org).filter(ranger_id__in=ids, status__in=["active", "acknowledged"])
+    # Only panic / dead man's switch put a ranger in ``sos``; an open HWC alert does not (spec v1.5 §A5).
+    sos = set(SafetyAlert.objects.for_org(org).filter(ranger_id__in=ids, status__in=["active", "acknowledged"],
+                                                      kind__in=SafetyAlert.SOS_KINDS)
               .values_list("ranger_id", flat=True))
     last_call = dict(AuthToken.objects.filter(user_id__in=ids).values("user_id").annotate(t=Max("last_used_at"))
                      .values_list("user_id", "t"))
@@ -194,6 +196,7 @@ def open_alert_items(org, area_id=None, ranger_ids=None) -> list[dict]:
     threats = Observation.objects.for_org(org).filter(threat_alert_q(), acknowledged_at__isnull=True).select_related("observer")
     if area_id:
         threats = threats.filter(area_id=area_id)
+        safety = safety.filter(Q(area_id=area_id) | Q(area_id__isnull=True))
     return [i for i in (alert_item(r) for r in list(safety) + list(threats)) if is_open(i)]
 
 
@@ -399,7 +402,9 @@ def summary(org, area: Area | None = None) -> dict:
         "rangers_sos": counts["sos"],
         "open_alerts": len(alerts),
         "critical_alerts": sum(1 for a in alerts if a["severity"] == "critical"),
-        "sos_active": sum(1 for a in alerts if a["type"] == "safety"),
+        # sos_active counts panic + dead man's switch only; HWC has its own counter (spec v1.5 §A5).
+        "sos_active": sum(1 for a in alerts if a["type"] == "safety" and a["kind"] in SafetyAlert.SOS_KINDS),
+        "hwc_active": sum(1 for a in alerts if a["type"] == "safety" and a["kind"] == SafetyAlert.HWC),
         "sync_rate_24h": round(len(synced_24h) / len(active_7d), 4) if active_7d else 0.0,
         "grts_coverage_month": round(cells_complete / cells_total, 4) if cells_total else 0.0,
         "observations_today": obs_today.count(),

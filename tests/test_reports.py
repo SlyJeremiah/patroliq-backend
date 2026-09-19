@@ -25,7 +25,7 @@ def rep():
     ranger = make_user(org, "ranger", full_name="Tendai Moyo", team=team)
     cells = list(GrtsCell.objects.filter(area=area).order_by("grts_order"))
     now = timezone.now() - timedelta(days=2)
-    elephant = Species.objects.create(common_name="African Savanna Elephant", scientific_name="Loxodonta africana")
+    elephant = Species.objects.get(scientific_name="Loxodonta africana")
     p = Patrol.objects.create(client_uuid=new_uuid(), organisation=org, ranger=ranger, team=team, area=area,
                               started_at=now, ended_at=now + timedelta(hours=3), status="ended", distance_m=8200,
                               duration_s=3 * 3600)

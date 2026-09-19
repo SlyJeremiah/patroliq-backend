@@ -33,6 +33,7 @@ from .security import (
 from .serializers import (
     LoginSerializer,
     PasswordChangeSerializer,
+    UserDetailSerializer,
     UserSerializer,
     UserWriteSerializer,
     auth_payload,
@@ -175,14 +176,20 @@ class PasswordChangeView(APIView):
 
 class UserViewSet(TenantScopedMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin,
                   mixins.UpdateModelMixin, mixins.DestroyModelMixin, viewsets.GenericViewSet):
-    """users/ — org_admin manages; managers may list. Licence seat limits -> 402."""
+    """
+    users/ — org_admin manages; managers may list. Licence seat limits -> 402.
+
+    This is the only endpoint that returns the personal details of §B (plus the ``profile`` object of
+    ``rangers/{id}/``), hence :class:`UserDetailSerializer` rather than the lean
+    :class:`UserSerializer` used by auth/me/bootstrap.
+    """
 
     queryset = User.objects.prefetch_related("areas")
     permission_classes = [roles_allowed(read=MANAGERS, write=ADMINS)]
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
 
     def get_serializer_class(self):
-        return UserSerializer if self.request.method in ("GET", "HEAD", "OPTIONS") else UserWriteSerializer
+        return UserDetailSerializer if self.request.method in ("GET", "HEAD", "OPTIONS") else UserWriteSerializer
 
     def scope_queryset(self, qs):
         p = self.request.query_params
@@ -208,7 +215,7 @@ class UserViewSet(TenantScopedMixin, mixins.ListModelMixin, mixins.RetrieveModel
             user.save()
             user.areas.set(areas)
         audit(request, "user.create", target=user, detail={"role": user.role})
-        body = {**UserSerializer(user).data, "temporary_password": temp_password}
+        body = {**UserDetailSerializer(user).data, "temporary_password": temp_password}
         if user.totp_secret:
             body.update(totp_secret=user.totp_secret, totp_uri=totp_uri(user))
         return Response(body, status=status.HTTP_201_CREATED)
@@ -234,7 +241,7 @@ class UserViewSet(TenantScopedMixin, mixins.ListModelMixin, mixins.RetrieveModel
             if not user.is_active:
                 AuthToken.objects.filter(user=user).delete()
         audit(request, "user.update", target=user, detail={"fields": sorted(request.data.keys())})
-        body = dict(UserSerializer(user).data)
+        body = dict(UserDetailSerializer(user).data)
         if issued_secret:
             body.update(totp_secret=issued_secret, totp_uri=totp_uri(user))
         return Response(body)

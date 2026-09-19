@@ -10,9 +10,24 @@ from django.db.models import Q
 from django.utils import timezone
 from rest_framework import serializers
 
+from . import hwc
 from .models import AlertEvent, Observation, SafetyAlert
 
 _dt = serializers.DateTimeField()
+
+#: Timeline note for the synthetic "raised" entry of each safety kind (spec v1.5 §A5).
+RAISED_NOTES = {
+    "panic": "Panic button pressed",
+    "dead_mans_switch": "Dead man's switch triggered",
+    SafetyAlert.HWC: "Human–wildlife conflict reported",
+}
+
+
+def safety_severity(alert: SafetyAlert) -> str:
+    """Panic / DMS are always ``critical``; HWC is ``critical`` only with human casualties."""
+    if alert.kind != SafetyAlert.HWC:
+        return "critical"
+    return "critical" if hwc.is_critical(alert.details) else "high"
 
 
 def fmt_dt(value):
@@ -26,11 +41,15 @@ def threat_alert_q() -> Q:
 def alert_item(obj, dispatched_at=None) -> dict:
     if isinstance(obj, SafetyAlert):
         item = {
-            "id": str(obj.pk), "type": "safety", "kind": obj.kind, "status": obj.status, "severity": "critical",
-            "ranger_id": str(obj.ranger_id), "ranger_name": obj.ranger.full_name, "area_id": None, "cell_id": None,
+            "id": str(obj.pk), "type": "safety", "kind": obj.kind, "status": obj.status,
+            "severity": safety_severity(obj), "title": hwc.alert_title(obj.kind, obj.details),
+            "ranger_id": str(obj.ranger_id), "ranger_name": obj.ranger.full_name,
+            "area_id": str(obj.area_id) if obj.area_id else None, "cell_id": None,
             "lat": obj.lat, "lon": obj.lon, "accuracy_m": obj.accuracy_m, "battery_pct": obj.battery_pct,
             "occurred_at": fmt_dt(obj.started_at), "acknowledged_at": fmt_dt(obj.acknowledged_at),
             "resolved_at": fmt_dt(obj.resolved_at), "note": obj.resolution_note,
+            "details": obj.details if obj.kind == SafetyAlert.HWC else None,
+            "details_updated_at": fmt_dt(obj.details_updated_at),
         }
     else:
         item = {
@@ -98,7 +117,7 @@ def alert_detail(alert) -> dict:
         person = alert.ranger
         item.update(signal_level=alert.signal_level, employee_id=person.employee_id)
         timeline = [{"at": fmt_dt(alert.started_at), "action": "raised", "actor_name": person.full_name,
-                     "note": "Panic button pressed" if alert.kind == "panic" else "Dead man's switch triggered"}]
+                     "note": RAISED_NOTES.get(alert.kind, "Safety alert raised")}]
     else:
         person = alert.observer
         item.update(category=alert.category, subtype=alert.subtype, species_name=alert.species_name,

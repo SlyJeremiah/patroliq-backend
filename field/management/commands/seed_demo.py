@@ -64,10 +64,11 @@ class Command(BaseCommand):
     # --- helpers ---------------------------------------------------------------------------------
 
     def seed_species(self):
-        for common, sci, sn, nd, iucn in SPECIES:
+        for common, sci, sn, nd, iucn, taxon in SPECIES:
             Species.objects.update_or_create(
                 id=uuid.uuid5(SPECIES_NAMESPACE, sci.strip().lower()),
-                defaults=dict(common_name=common, scientific_name=sci, shona_name=sn, ndebele_name=nd, iucn_status=iucn),
+                defaults=dict(common_name=common, scientific_name=sci, shona_name=sn, ndebele_name=nd,
+                              iucn_status=iucn, taxon_group=taxon),
             )
 
     def user(self, org, *, password, email=None, employee_id=None, **fields):

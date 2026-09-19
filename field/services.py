@@ -30,6 +30,7 @@ from audit.utils import audit
 from core.exceptions import ApiError, first_message, validation_code
 from notify.services import notify_managers
 
+from . import hwc
 from .models import Observation, Patrol, SafetyAlert, Species, TrackPoint
 from .serializers import (
     ObservationInSerializer,
@@ -283,23 +284,52 @@ def process_push(request, payload: dict) -> dict:
 # --- safety ----------------------------------------------------------------------------------------
 
 def _alert_message(alert: SafetyAlert) -> tuple[str, str]:
-    title = "PATROLIQ PANIC ALERT" if alert.kind == "panic" else "PATROLIQ DEAD MAN'S SWITCH ALERT"
+    titles = {"panic": "PATROLIQ PANIC ALERT", "dead_mans_switch": "PATROLIQ DEAD MAN'S SWITCH ALERT",
+              SafetyAlert.HWC: "PATROLIQ HUMAN-WILDLIFE CONFLICT"}
+    title = titles.get(alert.kind, "PATROLIQ SAFETY ALERT")
     ranger = alert.ranger
     where = f"{alert.lat:.5f},{alert.lon:.5f}" if alert.lat is not None and alert.lon is not None else "no GPS fix"
     battery = f"{alert.battery_pct}%" if alert.battery_pct is not None else "unknown"
     body = (f"{ranger.full_name} ({ranger.employee_id or ranger.email}) at {where}, battery {battery}, "
             f"{alert.started_at:%Y-%m-%d %H:%M}Z")
+    if alert.kind == SafetyAlert.HWC:
+        area_name = alert.area.name if alert.area_id else None
+        body = (f"{ranger.full_name} ({ranger.employee_id or ranger.email}) at {where}"
+                + (f" [{area_name}]" if area_name else "")
+                + f", {alert.started_at:%Y-%m-%d %H:%M}Z")
+        if alert.details:
+            body += f" — {hwc.details_summary(alert.details)}"
     return title, body
 
 
+def _resolve_alert_area(user, area_id):
+    """Unknown / other-tenant area ids are dropped, never rejected (safety path)."""
+    if not area_id:
+        return None
+    return Area.objects.for_org(user.organisation).filter(pk=area_id).values_list("pk", flat=True).first()
+
+
 def record_safety_alert(request, data: dict) -> tuple[SafetyAlert, bool]:
-    """Create (or refresh an active) safety alert. Raises serializers.ValidationError / ApiError."""
+    """
+    Create (or refresh) a safety alert; returns ``(alert, created)``.
+
+    Replaying the same ``client_uuid`` with a ``details`` block is how the phone logs an HWC details
+    log after the alert was raised (spec v1.5 §A3): non-null keys are merged into the stored object,
+    ``details_updated_at`` is set, and an ``AlertEvent`` note is written. Details are ignored once the
+    alert is ``cancelled`` and for non-HWC kinds. The collected ``details_warnings`` are attached to
+    the returned instance as ``alert.details_warnings`` for the view to echo.
+
+    Raises serializers.ValidationError / ApiError.
+    """
     user = request.user
     s = SafetyAlertInSerializer(data=data)
     s.is_valid(raise_exception=True)
     d = s.validated_data
     ignored = sorted(set(data.keys()) - set(s.fields.keys()))
-    existing = SafetyAlert.objects.select_related("ranger").filter(pk=d["client_uuid"]).first()
+    details_in, warnings = hwc.clean_details(d.get("details"))
+    if details_in:
+        details_in = hwc.resolve_species(details_in)
+    existing = SafetyAlert.objects.select_related("ranger", "area").filter(pk=d["client_uuid"]).first()
     if existing:
         if existing.organisation_id != user.organisation_id or existing.ranger_id != user.pk:
             raise ApiError(409, "client_uuid_conflict", "client_uuid already used by another record.")
@@ -309,6 +339,8 @@ def record_safety_alert(request, data: dict) -> tuple[SafetyAlert, bool]:
                 setattr(existing, f, d[f])
             if changed:
                 existing.save(update_fields=changed + ["updated_at"])
+        _merge_hwc_details(request, existing, details_in, warnings)
+        existing.details_warnings = warnings
         return existing, False
     try:
         with transaction.atomic():
@@ -317,21 +349,55 @@ def record_safety_alert(request, data: dict) -> tuple[SafetyAlert, bool]:
                 status="active", lat=d.get("lat"), lon=d.get("lon"), accuracy_m=d.get("accuracy_m"),
                 battery_pct=d.get("battery_pct"), signal_level=d.get("signal_level"),
                 started_at=d.get("started_at") or timezone.now(),
+                area_id=_resolve_alert_area(user, d.get("area_id")),
+                details=details_in or None if d["kind"] == SafetyAlert.HWC else None,
+                details_updated_at=timezone.now() if (details_in and d["kind"] == SafetyAlert.HWC) else None,
             )
     except IntegrityError:
         # Concurrent replay of our own alert, or (under PostgreSQL RLS, where other tenants' rows are
         # invisible to the lookup above) a client_uuid owned by someone else.
-        replay = SafetyAlert.objects.select_related("ranger").filter(pk=d["client_uuid"], ranger=user).first()
+        replay = SafetyAlert.objects.select_related("ranger", "area").filter(pk=d["client_uuid"], ranger=user).first()
         if replay is None:
             raise ApiError(409, "client_uuid_conflict", "client_uuid already used by another record.")
+        _merge_hwc_details(request, replay, details_in, warnings)
+        replay.details_warnings = warnings
         return replay, False
+    alert.details_warnings = warnings
     audit(request, "safety_alert.create", target=alert, detail={
         "kind": alert.kind, "lat": alert.lat, "lon": alert.lon, "battery_pct": alert.battery_pct,
+        "area_id": str(alert.area_id) if alert.area_id else None,
+        "details_fields": sorted(alert.details or {}), "details_warnings": warnings,
         "ranger_id_mismatch": bool(d.get("ranger_id") and d["ranger_id"] != user.pk), "ignored_fields": ignored})
     title, body = _alert_message(alert)
     notify_managers(user.organisation_id, title, body, {"type": "safety", "kind": alert.kind,
                                                          "client_uuid": str(alert.pk)})
     return alert, True
+
+
+def _merge_hwc_details(request, alert: SafetyAlert, details_in: dict, warnings: list[str]) -> None:
+    """Merge a details log into an existing HWC alert (spec v1.5 §A3/§A4)."""
+    from .alerts import record_event
+
+    if not details_in:
+        return
+    if alert.kind != SafetyAlert.HWC:
+        warnings.append("details: ignored for this alert kind")
+        return
+    if alert.status == "cancelled":
+        warnings.append("details: ignored because the alert is cancelled")
+        return
+    first = alert.details_updated_at is None
+    alert.details = hwc.merge_details(alert.details, details_in)
+    alert.details_updated_at = timezone.now()
+    alert.save(update_fields=["details", "details_updated_at", "updated_at"])
+    record_event(alert, "note", actor=request.user, note="Details logged" if first else "Details updated",
+                 at=alert.details_updated_at)
+    audit(request, "safety_alert.details", target=alert,
+          detail={"fields": sorted(details_in), "first": first, "details_warnings": warnings})
+    if first:
+        notify_managers(alert.organisation_id, "PATROLIQ HWC DETAILS",
+                        f"{alert.ranger.full_name}: {hwc.details_summary(alert.details)}",
+                        {"type": "safety", "kind": alert.kind, "client_uuid": str(alert.pk)})
 
 
 def cancel_safety_alert(request, alert: SafetyAlert, note: str | None) -> SafetyAlert:

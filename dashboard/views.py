@@ -12,6 +12,7 @@ from rest_framework import serializers, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+import geo
 from accounts.models import User
 from areas.models import Area, Sector
 from audit.utils import audit
@@ -23,6 +24,7 @@ from core.validation import SanitizedCharField, StrictSerializer
 from field.models import Species
 from notify.services import notify_user
 
+from . import heatmap as heatmap_service
 from . import reports as report_service
 from . import services
 from .models import REPORT_FORMATS, REPORT_TYPES, Report, ReportShare
@@ -76,15 +78,23 @@ class RangerListView(APIView):
 
 
 class RangerDetailView(APIView):
-    """GET rangers/{id}/ — list object + ``recent_observations`` (10) + ``alerts`` (5)."""
+    """
+    GET rangers/{id}/ — list object + ``recent_observations`` (10) + ``alerts`` (5) + ``profile``.
+
+    ``profile`` carries the ranger's personal details (spec v1.5 §B2). It is deliberately absent from
+    ``rangers/`` (the live-ops list), which the dashboard polls continuously.
+    """
 
     permission_classes = [roles_allowed(read=MANAGERS)]
 
     def get(self, request, pk):
+        from accounts.serializers import personal_profile
+
         org = request.user.organisation
         ranger = get_ranger(request, pk)
         body = services.ranger_payloads(org, [ranger])[0]
-        body.update(is_active=ranger.is_active, **services.ranger_detail_extras(org, ranger))
+        body.update(is_active=ranger.is_active, profile=personal_profile(ranger),
+                    **services.ranger_detail_extras(org, ranger))
         return Response(body)
 
 
@@ -138,6 +148,67 @@ class AreaRiskTrendView(APIView):
             raise ApiError(400, "validation_error", "days must be an integer between 1 and 366.",
                            fields={"days": ["Expected 1-366."]})
         return Response(services.risk_trend(area, days))
+
+
+class AreaHeatmapView(APIView):
+    """
+    GET areas/{id}/heatmap/?source=&days=&kernel=&bandwidth_m=&species_id= (spec v1.5 §C).
+
+    Kernel density surface over the area, computed on demand and cached. Same roles and licence
+    module as the risk map.
+    """
+
+    permission_classes = [roles_allowed(read=MANAGERS)]
+
+    def get(self, request, pk):
+        area = get_area(request, pk)
+        require_module(request.user.organisation, "ai_risk")
+        if not area.boundary:
+            raise ApiError(400, "boundary_required", "The area has no boundary yet.")
+        p = request.query_params
+        source = p.get("source") or "incidents"
+        if source not in heatmap_service.SOURCES:
+            raise ApiError(400, "validation_error", "Unknown source.",
+                           fields={"source": [f"Expected one of {', '.join(heatmap_service.SOURCES)}."]})
+        kernel = p.get("kernel") or "quartic"
+        if kernel not in geo.KERNELS:
+            raise ApiError(400, "validation_error", "Unknown kernel.",
+                           fields={"kernel": [f"Expected one of {', '.join(geo.KERNELS)}."]})
+        days = _bounded_int(p.get("days"), heatmap_service.MIN_DAYS, heatmap_service.MAX_DAYS,
+                            heatmap_service.DEFAULT_DAYS, "days")
+        low, high = heatmap_service.MANUAL_BANDWIDTH_RANGE
+        bandwidth = _bounded_float(p.get("bandwidth_m"), low, high, None, "bandwidth_m")
+        species_id = query_uuid(request, "species_id")
+        if species_id is not None and not Species.objects.filter(pk=species_id).exists():
+            raise ApiError(404, "not_found", "Species not found.")
+        return Response(heatmap_service.heatmap(area, source=source, days=days, kernel=kernel,
+                                                bandwidth_m=bandwidth, species_id=species_id))
+
+
+def _bounded_int(raw, low, high, default, name):
+    if raw in (None, ""):
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = None
+    if value is None or not low <= value <= high:
+        raise ApiError(400, "validation_error", f"{name} must be an integer between {low} and {high}.",
+                       fields={name: [f"Expected {low}-{high}."]})
+    return value
+
+
+def _bounded_float(raw, low, high, default, name):
+    if raw in (None, ""):
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = None
+    if value is None or not low <= value <= high:
+        raise ApiError(400, "validation_error", f"{name} must be a number between {low:g} and {high:g}.",
+                       fields={name: [f"Expected {low:g}-{high:g}."]})
+    return value
 
 
 def _visit_target(request) -> int | None:

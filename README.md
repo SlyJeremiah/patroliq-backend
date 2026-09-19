@@ -3,7 +3,10 @@
 Django REST API for the PATROLIQ offline-first wildlife-ranger patrol platform, operated by
 zrGISsolutions for multiple licensed organisations. The contract shared with the Android app is
 **[`docs/PATROLIQ_Platform_Spec_v1.2.md`](../docs/PATROLIQ_Platform_Spec_v1.2.md)** — paths and field
-names there are authoritative; clarifications are in its "Backend notes" section.
+names there are authoritative; clarifications are in its "Backend notes" sections (latest:
+**Backend notes v1.5**, covering the human–wildlife conflict alert, user personal details, the
+kernel density heat map and the species catalogue, specified in
+[`docs/PATROLIQ_v1.5_changes.md`](../docs/PATROLIQ_v1.5_changes.md)).
 
 Stack: Python 3.11 · Django 5.2 · Django REST Framework · shapely / pyproj / pyshp (no GDAL) · SQLite
 (dev/test) or PostgreSQL (production, with row-level security) · pyotp (TOTP).
@@ -14,14 +17,14 @@ Stack: Python 3.11 · Django 5.2 · Django REST Framework · shapely / pyproj / 
 |---|---|
 | `patroliq/` | settings (env-driven), URLs (`api_urls.py` = spec §5 routes) |
 | `core/` | tenant base models & mixins, strict validation, error envelope, permissions, RLS middleware |
-| `geo/` | **all spatial logic**: boundary import, repair, areas, reprojection, GRTS grid, cell lookup |
+| `geo/` | **all spatial logic**: boundary import, repair, areas, reprojection, GRTS grid, cell lookup, kernel density (`density.py`) |
 | `accounts/` | Organisation, Licence, User (custom), AuthToken, login lockout, TOTP, licensing rules |
 | `areas/` | Area, ApuBase, Sector, GrtsCell, Team, Assignment, RiskScore, FeatureLayer, risk engine |
-| `field/` | Species, Patrol, TrackPoint, Observation, Media, SafetyAlert, PositionPing, sync services |
+| `field/` | Species, Patrol, TrackPoint, Observation, Media, SafetyAlert (panic / DMS / HWC), PositionPing, sync services, `hwc.py` details log |
 | `audit/` | append-only AuditLog |
 | `notify/` | SMS/push provider interface (console, Twilio/FCM) + NotificationLog |
 | `platform_admin/` | zrGISsolutions `/platform/` endpoints (named to avoid shadowing stdlib `platform`) |
-| `dashboard/` | manager dashboard API (spec §7): summary, live rangers, coverage, risk, reports (PDF/CSV/GeoJSON) |
+| `dashboard/` | manager dashboard API (spec §7): summary, live rangers, coverage, risk, KDE heat map (`heatmap.py`), reports (PDF/CSV/GeoJSON) |
 | `sql/postgres_rls.sql` | PostgreSQL RLS policies, audit-log trigger, app-role grants |
 | `tests/` | pytest suite |
 
@@ -65,6 +68,7 @@ All secrets come from the environment (optionally a git-ignored `.env`). See `.e
 | `WEB_IP_ALLOWLIST` | — (off) | comma-separated CIDRs; web roles + web sign-in from other IPs → `403 ip_not_allowed` |
 | `TRUSTED_PROXY_COUNT` | 1 on Render (`RENDER` set), else 0 | proxies appending to `X-Forwarded-For`; client IP = right-most untrusted hop |
 | `DASHBOARD_URL` / `REPORT_SHARE_HOURS` | — / 48 | base URL for report share links / share lifetime |
+| `HEATMAP_CACHE_SECONDS` | 600 | TTL of a computed KDE surface (`areas/{id}/heatmap/`); newly synced records invalidate it regardless |
 | `DATA_UPLOAD_MAX_BYTES` | 20 MB | max JSON body (sync push), also the gzip decompression cap |
 | `NOTIFY_BACKEND` | `console` | `console` or `twilio_fcm` |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | — | SMS (twilio_fcm) |
@@ -89,7 +93,9 @@ per database — scan the printed `otpauth://` URI into Google Authenticator/Aut
 
 GRTTS: licence `standard`, all modules, expires 2027-09-30. **Mazowe Conservancy** (client Mazowe
 Landholders Trust): ~12 × 10 km boundary near -17.50, 30.95; bases `APU-1 HQ Camp`,
-`APU-2 Mazowe River`, `APU-3 Boundary Road`; 1 km GRTS grid; 3 sectors; demo roads/water layers; 35 species.
+`APU-2 Mazowe River`, `APU-3 Boundary Road`; 1 km GRTS grid; 3 sectors; demo roads/water layers. The
+species catalogue (220 Zimbabwe species with `taxon_group` and IUCN status) is installed by the
+`field/0004_species_catalogue` migration, so `seed_demo` is not needed for it.
 
 Dashboard demo data (GRTTS, relative to the time the seed runs, so re-run it to refresh "today"):
 
@@ -128,6 +134,15 @@ idempotency + cell assignment, media, positions, gzip bodies, sex/count validati
 `test_reports.py`, `test_network.py`: roles, tenancy, live status, coverage statuses, risk trend, dispatch,
 grid preview, every report type/format, anonymisation, share expiry, CORS, IP allowlist, seeded summary).
 
+v1.5 additions: `test_safety.py` covers the human–wildlife conflict alert (raise, notification, details
+merge on replay, never rejected by malformed details, severity rules, area filter, tenancy, push path);
+`test_heatmap.py` unit-tests the KDE maths in `geo/density.py` (symmetry, mass conservation, the
+Silverman bandwidth rule) and then the `areas/{id}/heatmap/` response shape, caching, sources, empty
+case, role/module gating and the risk-engine factor; `test_user_profile.py` covers the personal fields
+(validation, `full_name` derivation, org_admin-only writes, and that they never leak into
+`me/`/`auth/login`/`rangers/`/`sync/bootstrap`); `test_risk_and_validation.py` checks that the species
+catalogue migration is applied.
+
 ## Local API for dashboard development
 
 ```powershell
@@ -153,9 +168,10 @@ Full contract: spec §5. Auth header `Authorization: Token <key>`. JSON snake_ca
 * **Admin/manager** — `areas/` (+ `boundary/import/`, `boundary/`, `grid/generate/`, `activate/`, `cells/`,
   `sectors/`, additive `layers/roads|water/`), `apu-bases/`, `teams/`, `assignments/`, `users/`,
   `alerts/` (+ `acknowledge/`, additive `resolve/`), `observations/`, `patrols/`, `positions/latest/`,
-  `audit-log/`, `species/`
+  `audit-log/`, `species/` (incl. `taxon_group`)
 * **Manager dashboard (spec §7)** — `dashboard/summary/`, `rangers/` (+ `{id}/`, `{id}/message/`),
   `patrols/{client_uuid}/track/`, `positions/history/`, `areas/{id}/risk/` (+ `trend/`),
+  `areas/{id}/heatmap/` (v1.5 kernel density surface),
   `areas/{id}/coverage/` (+ `export/`), `reports/` (+ `{id}/`, `{id}/download/`, `{id}/share/`,
   `shared/{token}/`), `alerts/{id}/`, `alerts/{id}/dispatch/`; `areas/` setup counters,
   `grid/generate/` `dry_run`, `areas/{id}/cells/` as a GeoJSON FeatureCollection

@@ -338,7 +338,11 @@ class SafetyAlertCreateView(APIView):
         if not isinstance(request.data, dict):
             raise ApiError(400, "validation_error", "Expected a JSON object.")
         alert, created = services.record_safety_alert(request, request.data)
-        return Response(SafetyAlertSerializer(alert).data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        body = dict(SafetyAlertSerializer(alert).data)
+        warnings = getattr(alert, "details_warnings", None)
+        if warnings:
+            body["details_warnings"] = warnings
+        return Response(body, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 class SafetyAlertCancelView(APIView):
@@ -383,6 +387,9 @@ class AlertListView(APIView):
         threats = Observation.objects.for_org(org).filter(threat_alert_q()).select_related("observer")
         if area_id := query_uuid(request, "area_id"):
             threats = threats.filter(area_id=area_id)
+            # Safety alerts that carry an area (HWC) are filtered too; those without one always show,
+            # because an SOS with no area is still everyone's problem (spec v1.5 §A5).
+            safety = safety.filter(Q(area_id=area_id) | Q(area_id__isnull=True))
         if wanted == "active":
             safety, threats = safety.filter(status="active"), threats.filter(acknowledged_at__isnull=True)
         elif wanted == "acknowledged":

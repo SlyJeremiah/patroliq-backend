@@ -78,3 +78,70 @@ def test_validation_error_envelope():
     assert r.status_code == 400 and err["code"] == "validation_error"
     assert set(err["fields"]) == {"name", "area_type"}
     assert admin.get("/api/v1/nope/").json()["error"]["code"] == "not_found"
+
+
+def test_species_catalogue_migration_is_applied():
+    """field/0004 upserts the whole list, so a fresh database has it without seed_demo (spec v1.5 §E)."""
+    import uuid
+
+    from field.models import SPECIES_NAMESPACE, Species
+    from field.species_data import SPECIES, TAXON_GROUPS
+
+    assert len(SPECIES) >= 150
+    rows = {s.scientific_name: s for s in Species.objects.all()}
+    assert len(rows) >= len(SPECIES)
+    for common, scientific, shona, ndebele, iucn, taxon in SPECIES:
+        row = rows[scientific]
+        assert row.pk == uuid.uuid5(SPECIES_NAMESPACE, scientific.lower())  # stable ids across servers
+        assert (row.common_name, row.iucn_status, row.taxon_group) == (common, iucn, taxon)
+        assert (row.shona_name, row.ndebele_name) == (shona, ndebele)
+    assert {s.taxon_group for s in rows.values()} <= set(TAXON_GROUPS)
+    assert {s.taxon_group for s in rows.values()} >= {"mammal", "bird", "reptile"}
+    assert Species.objects.get(scientific_name="Loxodonta africana").iucn_status == "EN"
+    assert Species.objects.filter(taxon_group="bird").count() >= 50
+
+
+def test_species_endpoint_and_bootstrap_expose_taxon_group():
+    org = make_org()
+    ranger = make_user(org, "ranger")
+    rows = client_for(ranger).get("/api/v1/species/").json()
+    assert len(rows) >= 150
+    assert set(rows[0]) == {"id", "common_name", "scientific_name", "shona_name", "ndebele_name", "iucn_status",
+                            "taxon_group"}
+    crocodile = next(r for r in rows if r["scientific_name"] == "Crocodylus niloticus")
+    assert crocodile["taxon_group"] == "reptile" and crocodile["shona_name"] == "Garwe"
+
+
+def test_risk_incident_factor_is_kernel_density():
+    from datetime import timedelta
+    from uuid import uuid4
+
+    from django.utils import timezone
+
+    from areas.models import GrtsCell
+    from areas.risk import INCIDENT_DENSITY_LABEL
+    from field.models import Observation
+
+    org = make_org()
+    area = make_area(org)
+    ranger = make_user(org, "ranger")
+    cells = list(GrtsCell.objects.filter(area=area).order_by("grts_order"))
+    lon, lat = cells[0].centroid["coordinates"]
+    now = timezone.now()
+    for i in range(3):
+        Observation.objects.create(client_uuid=uuid4(), organisation=org, area=area, observer=ranger,
+                                   category="threat", severity="critical", lat=lat, lon=lon,
+                                   recorded_at=now - timedelta(days=i))
+    day = timezone.localdate()
+    score_area(area, day)
+    factors = {s.cell_id: next(f for f in s.factors if f["key"] == "incident_history")
+               for s in RiskScore.objects.filter(area=area, date=day)}
+    assert all(f["label"] == INCIDENT_DENSITY_LABEL for f in factors.values())
+    assert factors[cells[0].pk]["value"] == pytest.approx(1.0)  # the hottest cell normalises to 1
+    assert 0.0 <= min(f["value"] for f in factors.values()) < 1.0
+    # Observations older than the 90-day window do not count.
+    Observation.objects.all().update(recorded_at=now - timedelta(days=200))
+    score_area(area, day)
+    again = {s.cell_id: next(f for f in s.factors if f["key"] == "incident_history")
+             for s in RiskScore.objects.filter(area=area, date=day)}
+    assert all(f["value"] == 0.0 for f in again.values())

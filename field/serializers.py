@@ -101,6 +101,10 @@ class SafetyAlertInSerializer(serializers.Serializer):
     ranger_id = serializers.UUIDField(required=False, allow_null=True)
     kind = serializers.ChoiceField(choices=[c for c, _ in SafetyAlert.KINDS], default="panic")
     status = serializers.CharField(required=False, allow_null=True)  # server-controlled; ignored
+    area_id = serializers.UUIDField(required=False, allow_null=True)
+    # Never validated here: HWC details are cleaned leniently by field.hwc.clean_details so that a
+    # malformed details block can never make the safety call fail.
+    details = serializers.JSONField(required=False, allow_null=True)
     lat = serializers.FloatField(required=False, allow_null=True, **LAT)
     lon = serializers.FloatField(required=False, allow_null=True, **LON)
     accuracy_m = serializers.FloatField(required=False, allow_null=True, min_value=0)
@@ -131,7 +135,7 @@ class PositionPingInSerializer(StrictSerializer):
 class SpeciesSerializer(serializers.ModelSerializer):
     class Meta:
         model = Species
-        fields = ["id", "common_name", "scientific_name", "shona_name", "ndebele_name", "iucn_status"]
+        fields = ["id", "common_name", "scientific_name", "shona_name", "ndebele_name", "iucn_status", "taxon_group"]
 
 
 class RoundedInt(serializers.Field):
@@ -198,11 +202,13 @@ class ObservationListSerializer(ObservationSerializer):
 
 class SafetyAlertSerializer(serializers.ModelSerializer):
     ranger_id = serializers.UUIDField(read_only=True)
+    area_id = serializers.UUIDField(read_only=True)
 
     class Meta:
         model = SafetyAlert
         fields = ["client_uuid", "ranger_id", "kind", "status", "lat", "lon", "accuracy_m", "battery_pct",
-                  "signal_level", "started_at", "resolved_at", "resolution_note"]
+                  "signal_level", "started_at", "resolved_at", "resolution_note", "area_id", "details",
+                  "details_updated_at"]
 
 
 class PositionPingSerializer(serializers.ModelSerializer):

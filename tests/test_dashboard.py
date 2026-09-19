@@ -381,3 +381,47 @@ def test_seeded_demo_summary():
     assert counts == (Patrol.objects.count(), TrackPoint.objects.count(), Observation.objects.count(),
                       PositionPing.objects.count(), SafetyAlert.objects.count(), Report.objects.count(),
                       RiskScore.objects.count())
+
+
+def test_summary_separates_hwc_from_sos(ops):
+    """An HWC alert is open and urgent but is neither an SOS nor (by default) critical (spec v1.5 §A5)."""
+    org, area = ops["org"], ops["area"]
+    hwc = SafetyAlert.objects.create(client_uuid=new_uuid(), organisation=org, ranger=ops["r_offline"],
+                                     kind=SafetyAlert.HWC, status="active", area=area,
+                                     lat=-17.48, lon=30.95, started_at=timezone.now() - timedelta(minutes=2),
+                                     details={"conflict_type": "crop_raiding", "species_name": "African Elephant"})
+    body = ops["mgr"].get("/api/v1/dashboard/summary/").json()
+    assert body["open_alerts"] == 3 and body["sos_active"] == 1 and body["hwc_active"] == 1
+    assert body["critical_alerts"] == 2  # the panic alert and the poacher-camp threat only
+    # The HWC alert does not move its ranger into the sos bucket.
+    assert (body["rangers_sos"], body["rangers_offline"]) == (1, 1)
+
+    feed = {a["id"]: a for a in ops["mgr"].get("/api/v1/alerts/").json()}
+    item = feed[str(hwc.pk)]
+    assert item["severity"] == "high" and item["area_id"] == str(area.pk)
+    assert item["title"] == "Human–wildlife conflict · African Elephant · crop raiding"
+    assert feed[str(ops["sos"].pk)]["title"] == "Panic button" and feed[str(ops["sos"].pk)]["severity"] == "critical"
+    assert feed[str(ops["sos"].pk)]["area_id"] is None
+
+    # Human casualties raise it to critical.
+    hwc.details = {**hwc.details, "people_injured": 1}
+    hwc.save(update_fields=["details"])
+    body = ops["mgr"].get("/api/v1/dashboard/summary/").json()
+    assert body["critical_alerts"] == 3 and body["hwc_active"] == 1
+
+    # Resolving closes it.
+    assert ops["mgr"].post(f"/api/v1/alerts/{hwc.pk}/resolve/", {"note": "done"}, format="json").status_code == 200
+    assert ops["mgr"].get("/api/v1/dashboard/summary/").json()["hwc_active"] == 0
+
+
+def test_alerts_area_filter_keeps_arealess_safety_alerts(ops):
+    org, area = ops["org"], ops["area"]
+    hwc = SafetyAlert.objects.create(client_uuid=new_uuid(), organisation=org, ranger=ops["r_paused"],
+                                     kind=SafetyAlert.HWC, status="active", area=area,
+                                     lat=-17.48, lon=30.95, started_at=timezone.now())
+    ids = {a["id"] for a in ops["mgr"].get("/api/v1/alerts/", {"area_id": str(area.pk)}).json()}
+    assert {str(hwc.pk), str(ops["sos"].pk), str(ops["snare"].pk)} == ids
+
+    elsewhere = make_area(org, name="Far side", boundary=utm_square(31.55, -18.10))
+    ids = {a["id"] for a in ops["mgr"].get("/api/v1/alerts/", {"area_id": str(elsewhere.pk)}).json()}
+    assert ids == {str(ops["sos"].pk)}  # the SOS has no area, so it is never filtered out

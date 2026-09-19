@@ -8,7 +8,7 @@ Per GRTS cell and date a score 0–10 is the weighted mean of factor components 
   road_proximity       0.15   1 - min(distance_to_road / 3 km, 1)       (only if a roads layer exists)
   water_proximity      0.15   1 - min(distance_to_water / 2 km, 1)      (only if a water layer exists)
   patrol_gap           0.20   min(days since last patrol presence / 30, 1); never patrolled = 1
-  incident_history     0.10   min(threat/carcass reports in the last 90 days / 3, 1)
+  incident_history     0.10   kernel density of incidents (90 days) at the cell centroid / area max
   hour_of_day          0.05   1.0 at night (18:00–05:59 local), else 0.3
   moon_phase           0.04   moon illumination fraction (bright nights favour poaching)
   season               0.03   late dry (Aug–Oct) 1.0, early dry (May–Jul) 0.7, wet (Nov–Apr) 0.4
@@ -75,6 +75,48 @@ def season_component(month: int) -> tuple[float, str]:
     return 0.4, "wet season"
 
 
+INCIDENT_DENSITY_WINDOW_DAYS = 90
+INCIDENT_DENSITY_LABEL = "Incident density (KDE)"
+
+
+def incident_density_by_cell(area: Area, cells, end) -> dict:
+    """
+    Kernel density of incidents (source ``incidents``, 90 days) sampled at each cell centroid and
+    normalised 0–1 by the area's own maximum (spec v1.5 §C4).
+
+    One kernel surface is built per area/day: the points are gathered once, the bandwidth is chosen
+    once, and every cell centroid is evaluated in a single vectorised pass — so this costs the same
+    whether the area has 20 cells or 2000.
+    """
+    import numpy as np
+
+    from dashboard import heatmap as heatmap_service
+
+    if not cells:
+        return {}
+    since = end - timedelta(days=INCIDENT_DENSITY_WINDOW_DAYS)
+    lons, lats, weights = heatmap_service.collect_points(area, "incidents", since, end)
+    if lons.size == 0:
+        return {}
+    c = geo.shape_from_geojson(area.boundary).centroid
+    plane = geo.LocalPlane(c.x, c.y)
+    px, py = plane.to_xy(lons, lats)
+    h, _ = geo.silverman_bandwidth(px, py, weights)
+    # The surface is only ever sampled at cell centroids, one per grid cell, so a bandwidth narrower
+    # than the grid spacing cannot be resolved — it would just read 0 almost everywhere. Floor it at
+    # the cell size (the heat map endpoint, which rasterises finely, keeps the raw bandwidth).
+    h = max(h, float(area.grid_cell_size_m or 1000))
+    qx, qy = plane.to_xy(
+        np.asarray([cell.centroid["coordinates"][0] for cell in cells], dtype=float),
+        np.asarray([cell.centroid["coordinates"][1] for cell in cells], dtype=float),
+    )
+    values = geo.density_at(px, py, weights, qx, qy, h, "quartic")
+    peak = float(values.max())
+    if peak <= 0:
+        return {}
+    return {cell.pk: float(v / peak) for cell, v in zip(cells, values)}
+
+
 def score_area(area: Area, day: date, hour: int = 20) -> int:
     """Compute and upsert RiskScore rows for every cell of ``area`` on ``day``. Returns count."""
     from field.models import Observation, TrackPoint
@@ -98,11 +140,7 @@ def score_area(area: Area, day: date, hour: int = 20) -> int:
     last_track = dict(TrackPoint.objects.filter(organisation_id=area.organisation_id, cell__area=area,
                                                 recorded_at__lt=end_of_day)
                       .values("cell_id").annotate(last=Max("recorded_at")).values_list("cell_id", "last"))
-    incidents: dict = {}
-    for cid in Observation.objects.filter(area=area, cell__isnull=False, category__in=["threat", "carcass"],
-                                          recorded_at__gte=end_of_day - timedelta(days=90),
-                                          recorded_at__lt=end_of_day).values_list("cell_id", flat=True):
-        incidents[cid] = incidents.get(cid, 0) + 1
+    incident_density = incident_density_by_cell(area, cells, end_of_day)
 
     # Temporal factors are identical for every cell on this date/hour.
     is_night = hour % 24 >= 18 or hour % 24 < 6
@@ -132,8 +170,7 @@ def score_area(area: Area, day: date, hour: int = 20) -> int:
         else:
             gap = max(0.0, (end_of_day - last_seen).total_seconds() / 86400.0)
             comps["patrol_gap"] = (min(gap / 30.0, 1.0), f"Last patrolled {gap:.0f} day(s) ago")
-        n = incidents.get(cell.pk, 0)
-        comps["incident_history"] = (min(n / 3.0, 1.0), f"{n} threat/carcass report(s) in 90 days")
+        comps["incident_history"] = (incident_density.get(cell.pk, 0.0), INCIDENT_DENSITY_LABEL)
         comps["hour_of_day"] = (1.0 if is_night else 0.3, f"{'Night' if is_night else 'Day'} ({hour % 24:02d}:00 local)")
         comps["moon_phase"] = (moon, f"Moon {moon * 100:.0f}% illuminated")
         comps["season"] = (season_val, season_label.capitalize())

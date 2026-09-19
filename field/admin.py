@@ -5,7 +5,8 @@ from .models import Media, Observation, Patrol, PositionPing, SafetyAlert, Speci
 
 @admin.register(Species)
 class SpeciesAdmin(admin.ModelAdmin):
-    list_display = ("common_name", "scientific_name", "shona_name", "ndebele_name", "iucn_status")
+    list_display = ("common_name", "scientific_name", "taxon_group", "shona_name", "ndebele_name", "iucn_status")
+    list_filter = ("taxon_group", "iucn_status")
     search_fields = ("common_name", "scientific_name")
 
 
@@ -33,7 +34,8 @@ class MediaAdmin(admin.ModelAdmin):
 
 @admin.register(SafetyAlert)
 class SafetyAlertAdmin(admin.ModelAdmin):
-    list_display = ("client_uuid", "ranger", "kind", "status", "started_at", "resolved_at")
+    list_display = ("client_uuid", "ranger", "kind", "status", "area", "started_at", "details_updated_at",
+                    "resolved_at")
     list_filter = ("status", "kind", "organisation")
 
 

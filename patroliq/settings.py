@@ -243,6 +243,10 @@ TRUSTED_PROXY_HOPS = TRUSTED_PROXY_COUNT  # backwards-compatible name used by au
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "").strip().rstrip("/")
 REPORT_SHARE_HOURS = env_int("REPORT_SHARE_HOURS", 48)
 
+# Kernel density heat map (spec v1.5 §C): how long a computed surface stays cached. The cache key
+# already carries the newest source record's updated_at, so new synced data recomputes immediately.
+HEATMAP_CACHE_SECONDS = env_int("HEATMAP_CACHE_SECONDS", 600)
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["accounts.auth.ExpiringTokenAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": [

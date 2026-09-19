@@ -32,12 +32,14 @@ class Species(TimeStampedModel):
     """Global reference data (not tenant-owned). IDs are uuid5(scientific_name) — identical on every server."""
 
     IUCN = [(c, c) for c in ["LC", "NT", "VU", "EN", "CR", "EW", "EX", "DD", "NE"]]
+    TAXON_GROUPS = [(c, c.title()) for c in ["mammal", "bird", "reptile", "amphibian", "fish", "invertebrate"]]
     id = models.UUIDField(primary_key=True, editable=False)
     common_name = models.CharField(max_length=128)
     scientific_name = models.CharField(max_length=128, unique=True)
     shona_name = models.CharField(max_length=128, blank=True, default="")
     ndebele_name = models.CharField(max_length=128, blank=True, default="")
     iucn_status = models.CharField(max_length=2, choices=IUCN, default="NE")
+    taxon_group = models.CharField(max_length=16, choices=TAXON_GROUPS, default="mammal", db_index=True)
 
     class Meta:
         ordering = ["common_name"]
@@ -149,13 +151,26 @@ class Media(TenantModel, TimeStampedModel):
 
 
 class SafetyAlert(TenantModel, TimeStampedModel):
-    KINDS = [("panic", "Panic button"), ("dead_mans_switch", "Dead man's switch")]
+    """
+    Panic button, dead man's switch and (v1.5) human–wildlife conflict. HWC alerts travel the same
+    always-accepted safety path as SOS and additionally carry a ``details`` log that the ranger can
+    fill in afterwards by re-POSTing the same ``client_uuid`` (spec v1.5 §A).
+    """
+
+    HWC = "human_wildlife_conflict"
+    KINDS = [("panic", "Panic button"), ("dead_mans_switch", "Dead man's switch"),
+             (HWC, "Human-wildlife conflict")]
+    SOS_KINDS = ["panic", "dead_mans_switch"]
     STATUSES = [(c, c.title()) for c in ["active", "acknowledged", "resolved", "cancelled"]]
 
     client_uuid = models.UUIDField(primary_key=True)
     ranger = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="safety_alerts")
     kind = models.CharField(max_length=24, choices=KINDS, default="panic")
     status = models.CharField(max_length=16, choices=STATUSES, default="active", db_index=True)
+    area = models.ForeignKey("areas.Area", null=True, blank=True, on_delete=models.SET_NULL,
+                             related_name="safety_alerts")
+    details = models.JSONField(null=True, blank=True, help_text="HWC details log (spec v1.5 §A2)")
+    details_updated_at = models.DateTimeField(null=True, blank=True)
     lat = models.FloatField(null=True, blank=True)
     lon = models.FloatField(null=True, blank=True)
     accuracy_m = models.FloatField(null=True, blank=True)

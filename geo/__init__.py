@@ -18,6 +18,8 @@ Public API (import from ``geo``):
     build_grid, grts_balanced_order, grts_reverse_hierarchical_order — GRTS hexagon grid generation (see geo.grid)
     CellIndex                                   — fast point -> cell lookup
     read_boundary_file                          — shapefile zip / GeoJSON / KML import (geo.importers)
+    LocalPlane, silverman_bandwidth, density_grid, density_at, scale_to_uint8, peak_indices
+                                                — kernel density estimation (see geo.density)
 
 Migration path to PostGIS / GeoDjango (when GDAL is available in production):
     1. ``pip install`` GDAL, switch ENGINE to ``django.contrib.gis.db.backends.postgis`` and add
@@ -51,6 +53,20 @@ from .core import (  # noqa: F401
     shape_from_geojson,
     transformer,
     utm_crs_for,
+)
+from .density import (  # noqa: F401
+    DEFAULT_BANDWIDTH_M,
+    KERNELS,
+    LocalPlane,
+    MAX_BANDWIDTH_M,
+    MIN_BANDWIDTH_M,
+    density_at,
+    density_grid,
+    integrate,
+    peak_indices,
+    per_km2,
+    scale_to_uint8,
+    silverman_bandwidth,
 )
 from .grid import CellIndex, build_grid, grts_balanced_order, grts_reverse_hierarchical_order  # noqa: F401
 from .importers import BoundaryImport, read_boundary_file  # noqa: F401
