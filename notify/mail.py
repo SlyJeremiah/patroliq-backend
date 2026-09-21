@@ -54,9 +54,18 @@ def simple_email(title: str, body: str) -> EmailContent:
     return render_email("alert", title, {"title": title, "headline": body, "rows": [], "critical": False})
 
 
+BLOCKED_SMTP_PORTS = {25, 465, 587}
+
+
 def _error_text(exc: Exception) -> str:
     # SMTP exceptions carry the server's reply (never our password); keep it short.
-    return f"{type(exc).__name__}: {exc}"[:500]
+    text = f"{type(exc).__name__}: {exc}"
+    unreachable = isinstance(exc, (TimeoutError, ConnectionRefusedError)) or getattr(exc, "errno", None) in {101, 110, 111, 113}
+    if unreachable and settings.EMAIL_PORT in BLOCKED_SMTP_PORTS:
+        text += (f" — the server could not reach {settings.EMAIL_HOST}:{settings.EMAIL_PORT}. Many hosts (including"
+                 " Render's free instances) block outbound SMTP on ports 25, 465 and 587: use a provider that"
+                 " accepts port 2525 (e.g. Brevo smtp-relay.brevo.com, Mailgun, SendGrid) or a paid instance.")
+    return text[:500]
 
 
 def send_emails(recipients: list[str], content: EmailContent) -> list[tuple[bool, str]]:

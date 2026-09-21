@@ -512,3 +512,47 @@ def test_test_endpoint_throttled_per_user(ctx):
     assert r.status_code == 429 and r.json()["error"]["code"] == "throttled"
     # another user has their own budget
     assert client_for(ctx["admin"]).post("/api/v1/notify/test/", {"channel": "sms"}, format="json").status_code == 200
+
+
+def test_ipv4_smtp_backend_only_resolves_ipv4(monkeypatch):
+    import socket
+
+    from notify import smtp4
+
+    families = []
+
+    def fake_getaddrinfo(host, port, family=0, type=0, *a, **k):
+        families.append(family)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+    class FakeSock:
+        def __init__(self, *a):
+            self.connected = None
+
+        def settimeout(self, t):
+            pass
+
+        def connect(self, addr):
+            self.connected = addr
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(smtp4.socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(smtp4.socket, "socket", FakeSock)
+    sock = smtp4._ipv4_connection("smtp.example.org", 2525, 5)
+    assert families == [socket.AF_INET] and sock.connected == ("127.0.0.1", 2525)
+    assert smtp4.EmailBackend(host="smtp.example.org", port=2525).connection_class is smtp4._SMTP4
+    assert smtp4.EmailBackend(host="smtp.example.org", port=465, use_tls=False, use_ssl=True).connection_class is smtp4._SMTP4SSL
+
+
+def test_unreachable_smtp_port_error_explains_block(settings):
+    from notify.mail import _error_text
+
+    settings.EMAIL_HOST, settings.EMAIL_PORT = "smtp.gmail.com", 587
+    err = OSError(101, "Network is unreachable")
+    assert "port 2525" in _error_text(err) and "smtp.gmail.com:587" in _error_text(err)
+    settings.EMAIL_PORT = 2525
+    assert "port 2525" not in _error_text(err)
+    settings.EMAIL_PORT = 587
+    assert "port 2525" not in _error_text(ValueError("535 authentication failed"))

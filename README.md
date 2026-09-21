@@ -283,6 +283,8 @@ To enable it:
 
 ## Notifications
 
+> **Render free instances block outbound SMTP on ports 25, 465 and 587** (the error is `[Errno 101] Network is unreachable` or a timeout). Use a provider that also listens on **port 2525** — e.g. Brevo (`smtp-relay.brevo.com`, port 2525, free tier), Mailgun or SendGrid — or move to a paid instance. SMTP connects over IPv4 by default (`EMAIL_FORCE_IPV4=true`) because Render has no IPv6 egress.
+
 Managers and org admins (active, same organisation) are alerted by **SMS** (Twilio), **email** (SMTP)
 and a push stub (FCM). Everything is sent after the request's transaction commits, on a background
 thread pool (`NOTIFY_ASYNC`), so a slow or failing provider never delays or fails a ranger's SOS or

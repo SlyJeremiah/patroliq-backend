@@ -241,8 +241,10 @@ if EMAIL_USE_SSL:
 EMAIL_TIMEOUT = env_int("EMAIL_TIMEOUT", 15)
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "").strip() or EMAIL_HOST_USER or "PATROLIQ Alerts <alerts@localhost>"
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
-EMAIL_BACKEND = ("django.core.mail.backends.smtp.EmailBackend" if EMAIL_HOST
-                 else "django.core.mail.backends.console.EmailBackend")
+# IPv4-only SMTP by default: hosts like Render have no IPv6 egress, and SMTP providers publish AAAA records.
+EMAIL_FORCE_IPV4 = env_bool("EMAIL_FORCE_IPV4", True)
+EMAIL_BACKEND = (("notify.smtp4.EmailBackend" if EMAIL_FORCE_IPV4 else "django.core.mail.backends.smtp.EmailBackend")
+                 if EMAIL_HOST else "django.core.mail.backends.console.EmailBackend")
 EMAIL_ALERTS = env_bool("EMAIL_ALERTS", True)  # safety + threat alert emails
 EMAIL_SYNC_SUMMARIES = env_bool("EMAIL_SYNC_SUMMARIES", True)  # sync summary email after reportable pushes
 
