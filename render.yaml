@@ -82,8 +82,8 @@ services:
       # Email alerts + sync summaries over SMTP (README "Notifications")
       - key: EMAIL_HOST                    # e.g. smtp.gmail.com / smtp.office365.com / smtp-relay.brevo.com
         sync: false
-      - key: EMAIL_PORT
-        value: "587"
+      - key: EMAIL_PORT                    # 2525: Render free instances block 25, 465 and 587
+        value: "2525"
       - key: EMAIL_USE_TLS
         value: "true"
       - key: EMAIL_USE_SSL
