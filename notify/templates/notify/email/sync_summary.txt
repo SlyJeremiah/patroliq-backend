@@ -1,0 +1,25 @@
+{% autoescape off %}{{ ranger_name }} synced {{ count }} new record{{ count|pluralize }}
+
+{% for label, value in meta %}{{ label }}: {{ value }}
+{% endfor %}{% if alerts %}
+SAFETY ALERTS
+{% for item in alerts %}
+* {{ item.title }}
+{% for label, value in item.rows %}  {{ label }}: {{ value }}
+{% endfor %}{% if item.map_url %}  Map: {{ item.map_url }}
+{% endif %}{% endfor %}{% endif %}{% if patrols %}
+PATROL BRIEFS
+{% for item in patrols %}
+* {{ item.title }}
+{% for label, value in item.rows %}  {{ label }}: {{ value }}
+{% endfor %}{% endfor %}{% endif %}{% if observations %}
+OBSERVATIONS
+{% for item in observations %}
+* {{ item.title }}
+{% for label, value in item.rows %}  {{ label }}: {{ value }}
+{% endfor %}{% if item.map_url %}  Map: {{ item.map_url }}
+{% endif %}{% endfor %}{% endif %}{% if dashboard_url %}
+Dashboard: {{ dashboard_url }}
+{% endif %}
+--
+Automatic message from PATROLIQ.{% endautoescape %}

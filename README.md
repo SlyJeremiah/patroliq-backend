@@ -22,7 +22,7 @@ Stack: Python 3.11 · Django 5.2 · Django REST Framework · shapely / pyproj / 
 | `areas/` | Area, ApuBase, Sector, GrtsCell, Team, Assignment, RiskScore, FeatureLayer, risk engine |
 | `field/` | Species, Patrol, TrackPoint, Observation, Media, SafetyAlert (panic / DMS / HWC), PositionPing, sync services, `hwc.py` details log |
 | `audit/` | append-only AuditLog |
-| `notify/` | SMS/push provider interface (console, Twilio/FCM) + NotificationLog |
+| `notify/` | SMS/push provider interface (console, Twilio/FCM), SMTP email, E.164 phones, background delivery, NotificationLog, `notify/status/` + `notify/test/` |
 | `platform_admin/` | zrGISsolutions `/platform/` endpoints (named to avoid shadowing stdlib `platform`) |
 | `dashboard/` | manager dashboard API (spec §7): summary, live rangers, coverage, risk, KDE heat map (`heatmap.py`), reports (PDF/CSV/GeoJSON) |
 | `sql/postgres_rls.sql` | PostgreSQL RLS policies, audit-log trigger, app-role grants |
@@ -71,8 +71,16 @@ All secrets come from the environment (optionally a git-ignored `.env`). See `.e
 | `HEATMAP_CACHE_SECONDS` | 600 | TTL of a computed KDE surface (`areas/{id}/heatmap/`); newly synced records invalidate it regardless |
 | `DATA_UPLOAD_MAX_BYTES` | 20 MB | max JSON body (sync push), also the gzip decompression cap |
 | `NOTIFY_BACKEND` | `console` | `console` or `twilio_fcm` |
-| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | — | SMS (twilio_fcm) |
+| `NOTIFY_ASYNC` / `NOTIFY_WORKERS` | `true` / 2 | deliver after commit on a background thread pool |
+| `SMS_DEFAULT_COUNTRY_CODE` | `263` | country of numbers entered without a code |
+| `TWILIO_ACCOUNT_SID` | — | SMS (twilio_fcm), always required |
+| `TWILIO_API_KEY_SID` + `TWILIO_API_KEY_SECRET` **or** `TWILIO_AUTH_TOKEN` | — | Twilio auth (API key preferred) |
+| `TWILIO_MESSAGING_SERVICE_SID` **or** `TWILIO_FROM_NUMBER` | — | SMS sender |
 | `FCM_PROJECT_ID`, `FCM_ACCESS_TOKEN` | — | push stub (FCM HTTP v1, topic `org-<id>-managers`) |
+| `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD` | —, 587 | SMTP; empty host = email not configured (console + logged as skipped) |
+| `EMAIL_USE_TLS` / `EMAIL_USE_SSL` / `EMAIL_TIMEOUT` | `true` / `false` / 15 | STARTTLS on 587, or SSL on 465 |
+| `DEFAULT_FROM_EMAIL` | `EMAIL_HOST_USER` | e.g. `PATROLIQ Alerts <alerts@example.org>` |
+| `EMAIL_ALERTS` / `EMAIL_SYNC_SUMMARIES` | `true` / `true` | alert emails / sync summary emails |
 
 ## Demo data (`manage.py seed_demo`)
 
@@ -142,6 +150,13 @@ case, role/module gating and the risk-engine factor; `test_user_profile.py` cove
 (validation, `full_name` derivation, org_admin-only writes, and that they never leak into
 `me/`/`auth/login`/`rangers/`/`sync/bootstrap`); `test_risk_and_validation.py` checks that the species
 catalogue migration is applied.
+
+v1.6 additions: `test_notifications.py` covers E.164 normalisation and masking, phone validation on
+`users/`, alert emails (recipients, body, no personal fields), the sync summary (new observation, patrol
+start/end, urgent prefix; none for track points only, replays, or with `EMAIL_SYNC_SUMMARIES=false`),
+email failures not breaking a push, Twilio error formatting / API-key auth / messaging service (mocked
+`requests.post`), the single `no manager has a phone number` row, and `notify/status/` + `notify/test/`
+(shape, masking, role gating, tenancy, throttle, audit).
 
 ## Local API for dashboard development
 
@@ -266,6 +281,77 @@ To enable it:
    bootstrap → push smoke test as the app role, and the cross-tenant tests in `tests/test_tenancy.py`
    against a deployment using the app role.
 
+## Notifications
+
+Managers and org admins (active, same organisation) are alerted by **SMS** (Twilio), **email** (SMTP)
+and a push stub (FCM). Everything is sent after the request's transaction commits, on a background
+thread pool (`NOTIFY_ASYNC`), so a slow or failing provider never delays or fails a ranger's SOS or
+sync. Every attempt, success or failure, is a `NotificationLog` row (ops admin → Notifications).
+The dashboard's Settings → Notifications page reads `GET /api/v1/notify/status/` (what is configured,
+which managers lack a usable phone/email, recent failures) and can send a test to yourself with
+`POST /api/v1/notify/test/ {"channel": "sms" | "email"}` (5 per hour per user).
+
+What is sent:
+
+* **Alert SMS + email** for SOS panic, dead man's switch, HWC raised, first HWC details, SOS cancelled
+  and high/critical threat or carcass observations. The email adds employee ID, time in the area's
+  timezone, coordinates + Google Maps link, area, GRTS cell, HWC details, battery and signal.
+* **Sync summary email** after a `sync/push/` or `safety/alerts/` call that created something
+  reportable: a patrol started or ended (brief: type, team, base, times, duration, distance, notes,
+  debrief audio yes/no), new observations, new safety alerts or first HWC details. Track points,
+  position pings and re-uploads are never reported, so routine syncs of an ongoing patrol send nothing.
+  Subject `PATROLIQ sync · <ranger> · <n> new record(s)`, prefixed `⚠` for SOS/HWC/critical items.
+* Emails are plain text + simple HTML with no external images, and never contain personal-record
+  fields (national ID, date of birth, address, next of kin).
+
+### Email (SMTP)
+
+Set `EMAIL_HOST` (email is "not configured" without it), `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD` and
+`DEFAULT_FROM_EMAIL`. Port 587 + `EMAIL_USE_TLS=true` works for all of these; for port 465 set
+`EMAIL_USE_SSL=true` (and TLS is then ignored).
+
+| Provider | `EMAIL_HOST` | `EMAIL_HOST_USER` | `EMAIL_HOST_PASSWORD` | Notes |
+|---|---|---|---|---|
+| Gmail / Google Workspace | `smtp.gmail.com` | the full address | a 16-character **app password** (Google account → Security → 2-Step Verification → App passwords) | the normal password is refused; `DEFAULT_FROM_EMAIL` must be that address or a verified alias; ~500 messages/day |
+| Outlook / Microsoft 365 | `smtp.office365.com` | the full address | the mailbox password (or app password with MFA) | the tenant must allow *Authenticated SMTP* for the mailbox; personal outlook.com accounts may have SMTP basic auth disabled |
+| Brevo (ex-Sendinblue) | `smtp-relay.brevo.com` | the SMTP login shown under SMTP & API | the SMTP key (not the API key) | verify the sender/domain in Brevo first; free plan 300 emails/day |
+
+Example (`.env` or Render):
+
+```
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_USE_TLS=true
+EMAIL_HOST_USER=alerts@example.org
+EMAIL_HOST_PASSWORD=<app password>
+DEFAULT_FROM_EMAIL=PATROLIQ Alerts <alerts@example.org>
+```
+
+### SMS (Twilio)
+
+`NOTIFY_BACKEND=twilio_fcm`, `TWILIO_ACCOUNT_SID` (AC…), auth by API key (`TWILIO_API_KEY_SID` SK… +
+`TWILIO_API_KEY_SECRET`, preferred: revocable without rotating the account's auth token) or
+`TWILIO_AUTH_TOKEN`, and a sender: `TWILIO_MESSAGING_SERVICE_SID` (MG…) or `TWILIO_FROM_NUMBER`.
+Failures are logged with Twilio's own error code and message (e.g. `Twilio 21608: …`), never with a
+credential.
+
+Phone numbers are stored in E.164. The users API converts `0771234567`, `077 123 4567`,
+`263771234567` and `+263 77 123 4567` to `+263771234567` (`SMS_DEFAULT_COUNTRY_CODE`, default 263) and
+rejects anything else with `400 validation_error` on `phone`; older numbers are normalised at send time
+and logged as `invalid phone number` if they can't be. If no manager-level user has a valid phone, one
+`no manager has a phone number` row is logged per alert (email still goes out). Add one in Users.
+
+**Twilio trial accounts** (the usual reason SMS "doesn't arrive"):
+
+* a trial can only send to **Verified Caller IDs** (Console → Phone Numbers → Manage → Verified Caller
+  IDs); anything else fails with `21608`. Upgrade the account to send to any number;
+* enable **Zimbabwe** under Messaging → Settings → **Geo permissions**, or sends fail with `21408`;
+* the sender must be an **SMS-capable number owned by the account** (or a Messaging Service containing
+  one); a number without SMS capability, or one you do not own, fails with `21606`/`21659`. Trial
+  messages are prefixed "Sent from your Twilio trial account".
+
+Use Settings → Notifications → "Send test SMS" to check the setup; the error shown is Twilio's.
+
 ## Deploy on Render (+ Neon, Cloudflare R2, Vercel dashboard)
 
 `render.yaml` (Blueprint), `Procfile` and `.python-version` (3.11) are included; `gunicorn` is pinned in
@@ -307,8 +393,14 @@ To enable it:
 | `WEB_IP_ALLOWLIST` | empty, or office/VPN CIDRs | yes |
 | `R2_BUCKET`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | R2 bucket + token | yes |
 | `NOTIFY_BACKEND` | `console` until Twilio/FCM are configured, then `twilio_fcm` | |
-| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | Twilio | yes |
+| `NOTIFY_ASYNC` / `SMS_DEFAULT_COUNTRY_CODE` | `true` / `263` | |
+| `TWILIO_ACCOUNT_SID` | Twilio `AC…` | yes |
+| `TWILIO_API_KEY_SID` + `TWILIO_API_KEY_SECRET` (or `TWILIO_AUTH_TOKEN`) | Twilio API key `SK…` + secret | yes |
+| `TWILIO_MESSAGING_SERVICE_SID` (or `TWILIO_FROM_NUMBER`) | `MG…` / `+1…` SMS-capable number | yes |
 | `FCM_PROJECT_ID`, `FCM_ACCESS_TOKEN` | Firebase | yes |
+| `EMAIL_HOST`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `DEFAULT_FROM_EMAIL` | SMTP (see Notifications) | yes |
+| `EMAIL_PORT` / `EMAIL_USE_TLS` / `EMAIL_USE_SSL` / `EMAIL_TIMEOUT` | `587` / `true` / `false` / `15` | |
+| `EMAIL_ALERTS` / `EMAIL_SYNC_SUMMARIES` | `true` / `true` | |
 
 Without R2, uncomment the `disk` block in `render.yaml` and set `MEDIA_ROOT=/var/data/media` (single
 instance only). Reports whose stored file is missing (e.g. generated by `seed_demo` run from a laptop)

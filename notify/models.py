@@ -4,9 +4,9 @@ from django.db import models
 
 
 class NotificationLog(models.Model):
-    """Every outbound SMS/push attempt (delivery evidence for safety alerts)."""
+    """Every outbound SMS/push/email attempt (delivery evidence for safety alerts), success or failure."""
 
-    CHANNELS = [("sms", "SMS"), ("push", "Push")]
+    CHANNELS = [("sms", "SMS"), ("push", "Push"), ("email", "Email")]
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organisation_id = models.UUIDField(null=True, blank=True, db_index=True)
     recipient_id = models.UUIDField(null=True, blank=True)

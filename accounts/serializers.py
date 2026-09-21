@@ -170,6 +170,16 @@ class UserWriteSerializer(StrictModelSerializer):
         fields = ["employee_id", "email", "full_name", "role", "phone", "language", "is_active", "area_ids",
                   "apu_base_id", "team_id"] + PERSONAL_FIELDS
 
+    def validate_phone(self, value):
+        """Stored in E.164 (spec v1.6 §3): ``0771234567`` -> ``+263771234567``; blank clears it."""
+        from notify.phones import normalise_phone
+
+        phone = normalise_phone(value)
+        if phone is None:
+            raise serializers.ValidationError(
+                "Enter a valid phone number including the country code, e.g. +263 77 123 4567.")
+        return phone
+
     def validate_national_id(self, value):
         value = (value or "").strip().upper()
         if value and not NATIONAL_ID_RE.match(value):

@@ -1,0 +1,8 @@
+{% extends "notify/email/base.html" %}
+{% block kicker %}{% if critical %}Urgent alert{% else %}Alert{% endif %}{% endblock %}
+{% block content %}
+<h1 style="margin:0 0 8px;font-size:20px;color:{% if critical %}#b3261e{% else %}#102C26{% endif %};">{{ title }}</h1>
+<p style="margin:0 0 16px;">{{ headline }}</p>
+{% if rows %}{% include "notify/email/_rows.html" %}{% endif %}
+{% if map_url %}<p style="margin:0;"><a href="{{ map_url }}" style="color:#2f6b5b;">View location on Google Maps</a></p>{% endif %}
+{% endblock %}

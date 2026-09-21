@@ -1,0 +1,12 @@
+{% extends "notify/email/base.html" %}
+{% block kicker %}Sync summary{% endblock %}
+{% block content %}
+<h1 style="margin:0 0 8px;font-size:20px;color:#102C26;">{{ ranger_name }} synced {{ count }} new record{{ count|pluralize }}</h1>
+{% include "notify/email/_rows.html" with rows=meta %}
+{% if alerts %}<h2 style="font-size:16px;margin:20px 0 8px;color:#b3261e;">Safety alerts</h2>
+{% for item in alerts %}{% include "notify/email/_item.html" %}{% endfor %}{% endif %}
+{% if patrols %}<h2 style="font-size:16px;margin:20px 0 8px;color:#102C26;">Patrol briefs</h2>
+{% for item in patrols %}{% include "notify/email/_item.html" %}{% endfor %}{% endif %}
+{% if observations %}<h2 style="font-size:16px;margin:20px 0 8px;color:#102C26;">Observations</h2>
+{% for item in observations %}{% include "notify/email/_item.html" %}{% endfor %}{% endif %}
+{% endblock %}

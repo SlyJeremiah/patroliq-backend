@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ subject }}</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f5f4;font-family:Arial,Helvetica,sans-serif;color:#1f2a27;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f5f4;padding:16px 0;">
+<tr><td align="center">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;background:#ffffff;border-radius:6px;overflow:hidden;border:1px solid #dfe5e2;">
+<tr><td style="background:#102C26;padding:16px 20px;color:#ffffff;">
+<div style="font-size:18px;font-weight:bold;letter-spacing:1px;">PATROLIQ</div>
+<div style="font-size:13px;color:#cfe0da;margin-top:2px;">{% block kicker %}Notification{% endblock %}</div>
+</td></tr>
+<tr><td style="padding:20px;font-size:14px;line-height:1.5;">
+{% block content %}{% endblock %}
+{% if dashboard_url %}
+<p style="margin:24px 0 0;"><a href="{{ dashboard_url }}" style="display:inline-block;background:#102C26;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:4px;font-weight:bold;">Open the PATROLIQ dashboard</a></p>
+{% endif %}
+</td></tr>
+<tr><td style="padding:12px 20px;background:#f7f9f8;color:#6b7a75;font-size:12px;">
+Automatic message from PATROLIQ. You receive it as a manager or organisation admin. Do not reply.
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body>
+</html>

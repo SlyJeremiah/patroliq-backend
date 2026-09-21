@@ -1,0 +1,5 @@
+<div style="border-left:4px solid {% if item.critical %}#b3261e{% else %}#2f6b5b{% endif %};padding:4px 0 4px 12px;margin:0 0 16px;">
+<div style="font-weight:bold;font-size:15px;margin-bottom:4px;">{{ item.title }}</div>
+{% include "notify/email/_rows.html" with rows=item.rows %}
+{% if item.map_url %}<a href="{{ item.map_url }}" style="color:#2f6b5b;">View location on Google Maps</a>{% endif %}
+</div>

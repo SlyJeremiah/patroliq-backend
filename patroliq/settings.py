@@ -221,6 +221,31 @@ WEB_TOTP_REQUIRED = env_bool("WEB_TOTP_REQUIRED", True)
 
 NOTIFY_BACKEND = os.environ.get("NOTIFY_BACKEND", "console")
 
+# --- Notifications v1.6: background delivery, email (SMTP), SMS numbers --------------------------
+# Provider calls run after the request's transaction commits on a small thread pool so an SMTP/Twilio
+# timeout never delays or fails a ranger's sync or SOS. NOTIFY_ASYNC=false sends inline (tests).
+NOTIFY_ASYNC = env_bool("NOTIFY_ASYNC", True)
+NOTIFY_WORKERS = env_int("NOTIFY_WORKERS", 2)
+# Numbers without a country code are read as this country (Zimbabwe): 0771234567 -> +263771234567.
+SMS_DEFAULT_COUNTRY_CODE = os.environ.get("SMS_DEFAULT_COUNTRY_CODE", "263").strip().lstrip("+") or "263"
+# Email is "configured" when EMAIL_HOST is set; otherwise the console backend prints messages (dev)
+# and every email is logged in NotificationLog as skipped.
+EMAIL_HOST = os.environ.get("EMAIL_HOST", "").strip()
+EMAIL_PORT = env_int("EMAIL_PORT", 587)
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "").strip()
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", True)
+EMAIL_USE_SSL = env_bool("EMAIL_USE_SSL", False)
+if EMAIL_USE_SSL:
+    EMAIL_USE_TLS = False  # mutually exclusive in Django's SMTP backend (SSL wins: port 465)
+EMAIL_TIMEOUT = env_int("EMAIL_TIMEOUT", 15)
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "").strip() or EMAIL_HOST_USER or "PATROLIQ Alerts <alerts@localhost>"
+SERVER_EMAIL = DEFAULT_FROM_EMAIL
+EMAIL_BACKEND = ("django.core.mail.backends.smtp.EmailBackend" if EMAIL_HOST
+                 else "django.core.mail.backends.console.EmailBackend")
+EMAIL_ALERTS = env_bool("EMAIL_ALERTS", True)  # safety + threat alert emails
+EMAIL_SYNC_SUMMARIES = env_bool("EMAIL_SYNC_SUMMARIES", True)  # sync summary email after reportable pushes
+
 # --- Web dashboard: CORS + network ---------------------------------------------------------------
 # Token auth only (no cookies), so credentials are never allowed cross-origin.
 CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS")
@@ -264,7 +289,7 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.LimitOffsetPagination",
     "PAGE_SIZE": None,
     "DATETIME_FORMAT": "%Y-%m-%dT%H:%M:%SZ",
-    "DEFAULT_THROTTLE_RATES": {"login": os.environ.get("LOGIN_THROTTLE_RATE", "30/min")},
+    "DEFAULT_THROTTLE_RATES": {"login": os.environ.get("LOGIN_THROTTLE_RATE", "30/min"), "notify_test": "5/hour"},
     "UNAUTHENTICATED_USER": None,
     "TEST_REQUEST_DEFAULT_FORMAT": "json",
 }

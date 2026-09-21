@@ -1,0 +1,12 @@
+{% autoescape off %}{{ title }}
+
+{{ headline }}
+{% if rows %}
+{% for label, value in rows %}{{ label }}: {{ value }}
+{% endfor %}{% endif %}{% if map_url %}
+Map: {{ map_url }}
+{% endif %}{% if dashboard_url %}
+Dashboard: {{ dashboard_url }}
+{% endif %}
+--
+Automatic message from PATROLIQ.{% endautoescape %}

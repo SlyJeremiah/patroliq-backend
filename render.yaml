@@ -58,17 +58,48 @@ services:
         sync: false
       # Notifications
       - key: NOTIFY_BACKEND                # console | twilio_fcm
-        value: console
-      - key: TWILIO_ACCOUNT_SID
+        value: twilio_fcm
+      - key: NOTIFY_ASYNC                  # send after commit on a background thread (never blocks a sync/SOS)
+        value: "true"
+      - key: SMS_DEFAULT_COUNTRY_CODE      # 0771234567 -> +263771234567
+        value: "263"
+      - key: TWILIO_ACCOUNT_SID            # AC...
+        sync: false
+      - key: TWILIO_API_KEY_SID            # SK... (API key auth, preferred) - or leave empty and use the auth token
+        sync: false
+      - key: TWILIO_API_KEY_SECRET
         sync: false
       - key: TWILIO_AUTH_TOKEN
         sync: false
-      - key: TWILIO_FROM_NUMBER
+      - key: TWILIO_MESSAGING_SERVICE_SID  # MG... - or leave empty and set TWILIO_FROM_NUMBER
+        sync: false
+      - key: TWILIO_FROM_NUMBER            # an SMS-capable number owned by the Twilio account, E.164
         sync: false
       - key: FCM_PROJECT_ID
         sync: false
       - key: FCM_ACCESS_TOKEN
         sync: false
+      # Email alerts + sync summaries over SMTP (README "Notifications")
+      - key: EMAIL_HOST                    # e.g. smtp.gmail.com / smtp.office365.com / smtp-relay.brevo.com
+        sync: false
+      - key: EMAIL_PORT
+        value: "587"
+      - key: EMAIL_USE_TLS
+        value: "true"
+      - key: EMAIL_USE_SSL
+        value: "false"
+      - key: EMAIL_TIMEOUT
+        value: "15"
+      - key: EMAIL_HOST_USER
+        sync: false
+      - key: EMAIL_HOST_PASSWORD
+        sync: false
+      - key: DEFAULT_FROM_EMAIL            # e.g. PATROLIQ Alerts <alerts@example.org>
+        sync: false
+      - key: EMAIL_ALERTS
+        value: "true"
+      - key: EMAIL_SYNC_SUMMARIES
+        value: "true"
     # Without R2, attach a persistent disk instead (single instance, no zero-downtime deploys):
     # disk:
     #   name: patroliq-media

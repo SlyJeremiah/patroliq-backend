@@ -1,0 +1,6 @@
+{% extends "notify/email/base.html" %}
+{% block kicker %}Test message{% endblock %}
+{% block content %}
+<h1 style="margin:0 0 8px;font-size:20px;color:#102C26;">Email alerts work</h1>
+<p style="margin:0;">Hello {{ full_name }}, this test email confirms that PATROLIQ alert emails for {{ org_name }} reach this address.</p>
+{% endblock %}

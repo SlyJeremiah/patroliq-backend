@@ -32,6 +32,7 @@ from notify.services import notify_managers
 
 from . import hwc
 from .models import Observation, Patrol, SafetyAlert, Species, TrackPoint
+from .notifications import SyncReport, alert_email, observation_alert_email, queue_sync_summary
 from .serializers import (
     ObservationInSerializer,
     PatrolInSerializer,
@@ -112,6 +113,7 @@ def process_push(request, payload: dict) -> dict:
     area_ids = set(Area.objects.for_org(org).values_list("pk", flat=True))
     touched_patrols: set = set()
     alerts_to_notify: list[Observation] = []
+    report = SyncReport()  # newly created / just-ended records, for the sync summary email
 
     # ---- patrols --------------------------------------------------------------------------------
     for item in payload.get("patrols") or []:
@@ -149,18 +151,25 @@ def process_push(request, payload: dict) -> dict:
             values.update(distance_m=d["distance_m"], distance_from_client=True)
         if d.get("duration_s") is not None:
             values.update(duration_s=d["duration_s"], duration_from_client=True)
+        started = ended = False
         try:
             with transaction.atomic():
                 if existing is None:
                     Patrol.objects.create(client_uuid=d["client_uuid"], organisation=org, ranger=user, **values)
+                    started, ended = True, d["status"] == "ended"
                 elif not (existing.status == "ended" and d["status"] != "ended"):
+                    was_ended = existing.status == "ended"
                     for k, v in values.items():
                         setattr(existing, k, v)
                     existing.save()
+                    ended = not was_ended and d["status"] == "ended"
         except IntegrityError:
+            started = ended = False  # a concurrent push of the same patrol won the insert
             if not Patrol.objects.filter(pk=d["client_uuid"], organisation=org, ranger=user).exists():
                 _reject(rejected, cu, "client_uuid_conflict", "client_uuid already used by another record.")
                 continue
+        if started or ended:
+            report.patrol(d["client_uuid"], started=started, ended=ended)
         touched_patrols.add(d["client_uuid"])
         accepted["patrols"].append(str(d["client_uuid"]))
 
@@ -252,6 +261,7 @@ def process_push(request, payload: dict) -> dict:
                 _reject(rejected, cu, "client_uuid_conflict", "client_uuid already used by another record.")
             continue
         accepted["observations"].append(str(obs.pk))
+        report.observations.append(obs.pk)
         if obs.alert_manager or (obs.category in ("threat", "carcass") and obs.severity in ("high", "critical")):
             alerts_to_notify.append(obs)
 
@@ -259,7 +269,7 @@ def process_push(request, payload: dict) -> dict:
     for item in payload.get("safety_alerts") or []:
         cu = _cu(item)
         try:
-            alert, _ = record_safety_alert(request, item if isinstance(item, dict) else {})
+            alert, _ = record_safety_alert(request, item if isinstance(item, dict) else {}, report=report)
             accepted["safety_alerts"].append(str(alert.pk))
         except serializers.ValidationError as exc:
             _invalid(rejected, cu, exc.detail)
@@ -268,17 +278,28 @@ def process_push(request, payload: dict) -> dict:
 
     for obs in alerts_to_notify:
         cell_label = obs.cell.label if obs.cell_id else "outside grid"
-        notify_managers(org.pk, f"PATROLIQ {obs.category.upper()} ALERT",
-                        f"{user.full_name}: {obs.subtype or obs.category} ({obs.severity or 'n/a'}) at "
-                        f"{obs.lat:.5f},{obs.lon:.5f} [{cell_label}] {obs.recorded_at:%Y-%m-%d %H:%M}Z",
-                        {"type": "threat", "observation_client_uuid": str(obs.pk)})
+        title = f"PATROLIQ {obs.category.upper()} ALERT"
+        body = (f"{user.full_name}: {obs.subtype or obs.category} ({obs.severity or 'n/a'}) at "
+                f"{obs.lat:.5f},{obs.lon:.5f} [{cell_label}] {obs.recorded_at:%Y-%m-%d %H:%M}Z")
+        notify_managers(org.pk, title, body, {"type": "threat", "observation_client_uuid": str(obs.pk)},
+                        email=_safe_email(observation_alert_email, obs, title, body))
 
     user.last_sync_at = timezone.now()
     user.save(update_fields=["last_sync_at"])
     audit(request, "sync.push", target=user, detail={
         "patrols": len(accepted["patrols"]), "observations": len(accepted["observations"]),
         "safety_alerts": len(accepted["safety_alerts"]), "track_points": tp_accepted, "rejected": len(rejected)})
+    queue_sync_summary(request, report)
     return {"accepted": accepted, "track_points_accepted": tp_accepted, "rejected": rejected}
+
+
+def _safe_email(builder, *args):
+    """Render an alert email; on any error fall back to the plain one (the SMS must still go out)."""
+    try:
+        return builder(*args)
+    except Exception:  # noqa: BLE001
+        logger.exception("could not build the alert email")
+        return None
 
 
 # --- safety ----------------------------------------------------------------------------------------
@@ -309,9 +330,13 @@ def _resolve_alert_area(user, area_id):
     return Area.objects.for_org(user.organisation).filter(pk=area_id).values_list("pk", flat=True).first()
 
 
-def record_safety_alert(request, data: dict) -> tuple[SafetyAlert, bool]:
+def record_safety_alert(request, data: dict, report: SyncReport | None = None) -> tuple[SafetyAlert, bool]:
     """
     Create (or refresh) a safety alert; returns ``(alert, created)``.
+
+    What was *new* (the alert itself, or a first HWC details log) is added to ``report``. Called
+    without a report (``POST safety/alerts/``) the call is its own sync and queues the sync summary
+    email itself; ``process_push`` passes its batch report and queues one summary at the end.
 
     Replaying the same ``client_uuid`` with a ``details`` block is how the phone logs an HWC details
     log after the alert was raised (spec v1.5 §A3): non-null keys are merged into the stored object,
@@ -321,6 +346,15 @@ def record_safety_alert(request, data: dict) -> tuple[SafetyAlert, bool]:
 
     Raises serializers.ValidationError / ApiError.
     """
+    own_report = report is None
+    report = SyncReport() if own_report else report
+    result = _record_safety_alert(request, data, report)
+    if own_report:
+        queue_sync_summary(request, report)
+    return result
+
+
+def _record_safety_alert(request, data: dict, report: SyncReport) -> tuple[SafetyAlert, bool]:
     user = request.user
     s = SafetyAlertInSerializer(data=data)
     s.is_valid(raise_exception=True)
@@ -339,7 +373,7 @@ def record_safety_alert(request, data: dict) -> tuple[SafetyAlert, bool]:
                 setattr(existing, f, d[f])
             if changed:
                 existing.save(update_fields=changed + ["updated_at"])
-        _merge_hwc_details(request, existing, details_in, warnings)
+        _merge_hwc_details(request, existing, details_in, warnings, report)
         existing.details_warnings = warnings
         return existing, False
     try:
@@ -359,7 +393,7 @@ def record_safety_alert(request, data: dict) -> tuple[SafetyAlert, bool]:
         replay = SafetyAlert.objects.select_related("ranger", "area").filter(pk=d["client_uuid"], ranger=user).first()
         if replay is None:
             raise ApiError(409, "client_uuid_conflict", "client_uuid already used by another record.")
-        _merge_hwc_details(request, replay, details_in, warnings)
+        _merge_hwc_details(request, replay, details_in, warnings, report)
         replay.details_warnings = warnings
         return replay, False
     alert.details_warnings = warnings
@@ -368,13 +402,16 @@ def record_safety_alert(request, data: dict) -> tuple[SafetyAlert, bool]:
         "area_id": str(alert.area_id) if alert.area_id else None,
         "details_fields": sorted(alert.details or {}), "details_warnings": warnings,
         "ranger_id_mismatch": bool(d.get("ranger_id") and d["ranger_id"] != user.pk), "ignored_fields": ignored})
+    report.alerts.append(alert.pk)
     title, body = _alert_message(alert)
     notify_managers(user.organisation_id, title, body, {"type": "safety", "kind": alert.kind,
-                                                         "client_uuid": str(alert.pk)})
+                                                         "client_uuid": str(alert.pk)},
+                    email=_safe_email(alert_email, alert, title, body))
     return alert, True
 
 
-def _merge_hwc_details(request, alert: SafetyAlert, details_in: dict, warnings: list[str]) -> None:
+def _merge_hwc_details(request, alert: SafetyAlert, details_in: dict, warnings: list[str],
+                       report: SyncReport | None = None) -> None:
     """Merge a details log into an existing HWC alert (spec v1.5 §A3/§A4)."""
     from .alerts import record_event
 
@@ -395,9 +432,12 @@ def _merge_hwc_details(request, alert: SafetyAlert, details_in: dict, warnings: 
     audit(request, "safety_alert.details", target=alert,
           detail={"fields": sorted(details_in), "first": first, "details_warnings": warnings})
     if first:
-        notify_managers(alert.organisation_id, "PATROLIQ HWC DETAILS",
-                        f"{alert.ranger.full_name}: {hwc.details_summary(alert.details)}",
-                        {"type": "safety", "kind": alert.kind, "client_uuid": str(alert.pk)})
+        if report is not None:
+            report.hwc_details.append(alert.pk)
+        title, body = "PATROLIQ HWC DETAILS", f"{alert.ranger.full_name}: {hwc.details_summary(alert.details)}"
+        notify_managers(alert.organisation_id, title, body,
+                        {"type": "safety", "kind": alert.kind, "client_uuid": str(alert.pk)},
+                        email=_safe_email(alert_email, alert, title, body))
 
 
 def cancel_safety_alert(request, alert: SafetyAlert, note: str | None) -> SafetyAlert:
@@ -411,7 +451,8 @@ def cancel_safety_alert(request, alert: SafetyAlert, note: str | None) -> Safety
 
     record_event(alert, "cancelled", actor=request.user, note=note or "", at=alert.resolved_at)
     audit(request, "safety_alert.cancel", target=alert, detail={"note": note or ""})
-    notify_managers(alert.organisation_id, "PATROLIQ SOS CANCELLED",
-                    f"{alert.ranger.full_name} cancelled the {alert.get_kind_display().lower()} alert (PIN verified).",
-                    {"type": "safety_cancelled", "client_uuid": str(alert.pk)})
+    title = "PATROLIQ SOS CANCELLED"
+    body = f"{alert.ranger.full_name} cancelled the {alert.get_kind_display().lower()} alert (PIN verified)."
+    notify_managers(alert.organisation_id, title, body, {"type": "safety_cancelled", "client_uuid": str(alert.pk)},
+                    email=_safe_email(alert_email, alert, title, body))
     return alert

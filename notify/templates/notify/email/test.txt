@@ -1,0 +1,8 @@
+{% autoescape off %}Email alerts work
+
+Hello {{ full_name }}, this test email confirms that PATROLIQ alert emails for {{ org_name }} reach this address.
+{% if dashboard_url %}
+Dashboard: {{ dashboard_url }}
+{% endif %}
+--
+Automatic message from PATROLIQ.{% endautoescape %}

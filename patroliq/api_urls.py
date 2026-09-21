@@ -7,6 +7,7 @@ from areas.views import ApuBaseViewSet, AreaViewSet, AssignmentViewSet, TeamView
 from audit.views import AuditLogListView
 from dashboard import views as dashboard_views
 from field import views as field_views
+from notify import views as notify_views
 from platform_admin import views as platform_views
 
 router = SimpleRouter()
@@ -62,6 +63,9 @@ urlpatterns = [
     path("reports/<uuid:pk>/share/", dashboard_views.ReportShareView.as_view(), name="report-share"),
     path("audit-log/", AuditLogListView.as_view(), name="audit-log"),
     path("species/", field_views.SpeciesListView.as_view(), name="species"),
+    # Notification health (spec v1.6 §4)
+    path("notify/status/", notify_views.NotifyStatusView.as_view(), name="notify-status"),
+    path("notify/test/", notify_views.NotifyTestView.as_view(), name="notify-test"),
     # Platform
     path("platform/organisations/", platform_views.OrganisationListCreateView.as_view(), name="platform-orgs"),
     path("platform/organisations/<uuid:pk>/", platform_views.OrganisationDetailView.as_view(), name="platform-org"),
