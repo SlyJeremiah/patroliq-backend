@@ -20,6 +20,8 @@ Public API (import from ``geo``):
     read_boundary_file                          — shapefile zip / GeoJSON / KML import (geo.importers)
     LocalPlane, silverman_bandwidth, density_grid, density_at, scale_to_uint8, peak_indices
                                                 — kernel density estimation (see geo.density)
+    clean_track, clean_distance_m, CleanTrack, Fix, MAX_SPEED_MPS
+                                                — patrol track sanitising (see geo.track)
 
 Migration path to PostGIS / GeoDjango (when GDAL is available in production):
     1. ``pip install`` GDAL, switch ENGINE to ``django.contrib.gis.db.backends.postgis`` and add
@@ -70,3 +72,15 @@ from .density import (  # noqa: F401
 )
 from .grid import CellIndex, build_grid, grts_balanced_order, grts_reverse_hierarchical_order  # noqa: F401
 from .importers import BoundaryImport, read_boundary_file  # noqa: F401
+from .track import (  # noqa: F401
+    DRIFT_FLOOR_M,
+    MAX_ACCURACY_M,
+    MAX_SPEED_MPS,
+    MIN_LEG_M,
+    CleanTrack,
+    Fix,
+    accuracy_limit,
+    clean_distance_m,
+    clean_track,
+    max_speed_for,
+)

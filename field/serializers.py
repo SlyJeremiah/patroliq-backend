@@ -139,21 +139,30 @@ class SpeciesSerializer(serializers.ModelSerializer):
 
 
 class RoundedInt(serializers.Field):
+    """Metres as a whole number. DRF renders a null model field as null without calling this."""
+
     def to_representation(self, value):
         return int(round(value or 0))
 
 
 class PatrolSerializer(serializers.ModelSerializer):
+    """
+    ``distance_m`` is the stored figure (client-supplied when ``distance_from_client``);
+    ``distance_clean_m`` is measured over the sanitised track and is null while the patrol has no
+    track points. Prefer ``distance_clean_m`` when it is present — see ``geo/track.py``.
+    """
+
     ranger_id = serializers.UUIDField(read_only=True)
     team_id = serializers.UUIDField(read_only=True)
     area_id = serializers.UUIDField(read_only=True)
     apu_base_id = serializers.UUIDField(read_only=True)
     distance_m = RoundedInt(read_only=True)
+    distance_clean_m = RoundedInt(read_only=True)
 
     class Meta:
         model = Patrol
         fields = ["client_uuid", "ranger_id", "team_id", "area_id", "apu_base_id", "patrol_type", "started_at",
-                  "ended_at", "status", "distance_m", "duration_s", "notes", "debrief_audio"]
+                  "ended_at", "status", "distance_m", "distance_clean_m", "duration_s", "notes", "debrief_audio"]
 
 
 class TrackPointSerializer(serializers.ModelSerializer):

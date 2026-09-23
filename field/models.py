@@ -68,6 +68,11 @@ class Patrol(TenantModel, TimeStampedModel):
     ended_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=16, choices=STATUSES, default="active")
     distance_m = models.FloatField(default=0)
+    # Distance over the *sanitised* track (geo.track.clean_track): outliers from the old
+    # GPS+network recording dropped. NULL means "not measurable" — the patrol has no track points
+    # at all — which is not the same as 0.0 ("walked nowhere"). Kept alongside distance_m so a
+    # client-supplied figure is never lost; see Patrol.effective_distance_m.
+    distance_clean_m = models.FloatField(null=True, blank=True)
     duration_s = models.PositiveIntegerField(default=0)
     distance_from_client = models.BooleanField(default=False)
     duration_from_client = models.BooleanField(default=False)
@@ -76,6 +81,17 @@ class Patrol(TenantModel, TimeStampedModel):
 
     class Meta:
         ordering = ["-started_at"]
+
+    @property
+    def effective_distance_m(self) -> float:
+        """
+        The distance to report: the sanitised one when we have a track, else what was stored.
+
+        Aggregates (dashboard KPIs, reports) use this; payloads that mirror the row itself
+        (``GET patrols/``, the track endpoint) carry ``distance_m`` and ``distance_clean_m``
+        separately so a client can still see both.
+        """
+        return (self.distance_m or 0.0) if self.distance_clean_m is None else self.distance_clean_m
 
 
 class TrackPoint(TenantModel):

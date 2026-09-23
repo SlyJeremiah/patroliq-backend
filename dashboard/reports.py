@@ -29,6 +29,7 @@ from django.db.models import Avg, Count, Max, Q
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 
+import geo
 from areas.models import Area, GrtsCell, RiskScore, Sector
 from audit.utils import audit
 from field.alerts import threat_alert_q
@@ -171,7 +172,9 @@ def collect(org, params: dict, anonymised: bool) -> ReportData:
     visited = {cid for cid in tp_days if cid in cell_ids}
     coverage_pct = round(len(visited) / len(cells), 4) if cells else 0.0
 
-    distance_km = round(sum(p.distance_m or 0 for p in patrols) / 1000, 1)
+    # Distances use Patrol.effective_distance_m: the sanitised track total when the patrol has
+    # track points, else the stored figure. See geo/track.py — raw points are never changed.
+    distance_km = round(sum(p.effective_distance_m for p in patrols) / 1000, 1)
     hours = round(sum(p.duration_s or 0 for p in patrols) / 3600, 1)
 
     weeks: dict = {}
@@ -226,7 +229,7 @@ def collect(org, params: dict, anonymised: bool) -> ReportData:
         cols = ["Date", "Ranger", "Team", "Type", "Status", "Start", "Hours", "Distance km", "Observations"]
         rows = [[_local(p.started_at, tz, "%Y-%m-%d"), who(p.ranger_id), "" if anonymised else (p.team.name if p.team_id else ""),
                  p.patrol_type, p.status, _local(p.started_at, tz, "%H:%M"), round((p.duration_s or 0) / 3600, 1),
-                 round((p.distance_m or 0) / 1000, 2), obs_per_patrol.get(p.pk, 0)] for p in patrols]
+                 round(p.effective_distance_m / 1000, 2), obs_per_patrol.get(p.pk, 0)] for p in patrols]
         if anonymised:
             cols.remove("Team")
             rows = [r[:2] + r[3:] for r in rows]
@@ -281,7 +284,7 @@ def collect(org, params: dict, anonymised: bool) -> ReportData:
         for p in patrols:
             s = stats[p.ranger_id]
             s["patrols"] += 1
-            s["km"] += (p.distance_m or 0) / 1000
+            s["km"] += p.effective_distance_m / 1000
             s["hours"] += (p.duration_s or 0) / 3600
             s["team"] = p.team.name if p.team_id else s["team"]
         for o in obs:
@@ -305,7 +308,7 @@ def collect(org, params: dict, anonymised: bool) -> ReportData:
                                                                         "inc": 0, "ack": 0, "alerts": 0})
             m["patrols"] += 1
             m["days"].add((p.ranger_id, p.started_at.astimezone(tz).date()))
-            m["km"] += (p.distance_m or 0) / 1000
+            m["km"] += p.effective_distance_m / 1000
         alert_ids = set(Observation.objects.for_org(org).filter(threat_alert_q(), pk__in=[o.pk for o in obs])
                         .values_list("pk", flat=True))
         for o in obs:
@@ -355,15 +358,22 @@ def collect(org, params: dict, anonymised: bool) -> ReportData:
     def track_features():
         if anonymised or not patrols:
             return []
+        # Sanitised tracks (geo/track.py): outliers from the old GPS+network recording would
+        # otherwise draw a zig-zag on the report map and disagree with the reported distance.
+        raw: dict = defaultdict(list)
+        for pid, lat, lon, acc, speed, at in (
+                TrackPoint.objects.filter(organisation_id=org.pk, patrol_id__in=patrol_ids)
+                .order_by("patrol_id", "recorded_at")
+                .values_list("patrol_id", "lat", "lon", "accuracy_m", "speed_mps", "recorded_at")):
+            raw[pid].append((lat, lon, acc, speed, at))
         coords: dict = defaultdict(list)
-        for pid, lon, lat in (TrackPoint.objects.filter(organisation_id=org.pk, patrol_id__in=patrol_ids)
-                              .order_by("patrol_id", "recorded_at").values_list("patrol_id", "lon", "lat")):
-            coords[pid].append([round(lon, 7), round(lat, 7)])
+        for p in patrols:
+            coords[p.pk] = geo.clean_track(raw.get(p.pk, ()), patrol_type=p.patrol_type).coordinates
         return [{"type": "Feature", "id": str(p.pk),
                  "geometry": {"type": "LineString", "coordinates": coords[p.pk]} if len(coords[p.pk]) >= 2 else None,
                  "properties": {"kind": "track", "client_uuid": str(p.pk), "ranger_id": str(p.ranger_id),
                                 "ranger_name": who(p.ranger_id), "started_at": dt_iso(p.started_at),
-                                "ended_at": dt_iso(p.ended_at), "distance_m": int(round(p.distance_m or 0)),
+                                "ended_at": dt_iso(p.ended_at), "distance_m": int(round(p.effective_distance_m)),
                                 "status": p.status, "patrol_type": p.patrol_type}} for p in patrols]
 
     def cell_features():

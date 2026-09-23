@@ -274,6 +274,11 @@ REPORT_SHARE_HOURS = env_int("REPORT_SHARE_HOURS", 48)
 # already carries the newest source record's updated_at, so new synced data recomputes immediately.
 HEATMAP_CACHE_SECONDS = env_int("HEATMAP_CACHE_SECONDS", 600)
 
+# Patrol track sanitising (geo/track.py): a stored track point whose reported accuracy is worse
+# than this many metres is ignored when a patrol's distance and drawn track are computed. The raw
+# rows are always kept. 35 m matches the accuracy gate the Android app applies on the device.
+TRACK_MAX_ACCURACY_M = env_int("TRACK_MAX_ACCURACY_M", 35)
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["accounts.auth.ExpiringTokenAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": [

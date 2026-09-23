@@ -17,7 +17,7 @@ Stack: Python 3.11 · Django 5.2 · Django REST Framework · shapely / pyproj / 
 |---|---|
 | `patroliq/` | settings (env-driven), URLs (`api_urls.py` = spec §5 routes) |
 | `core/` | tenant base models & mixins, strict validation, error envelope, permissions, RLS middleware |
-| `geo/` | **all spatial logic**: boundary import, repair, areas, reprojection, GRTS grid, cell lookup, kernel density (`density.py`) |
+| `geo/` | **all spatial logic**: boundary import, repair, areas, reprojection, GRTS grid, cell lookup, kernel density (`density.py`), track sanitising (`track.py`) |
 | `accounts/` | Organisation, Licence, User (custom), AuthToken, login lockout, TOTP, licensing rules |
 | `areas/` | Area, ApuBase, Sector, GrtsCell, Team, Assignment, RiskScore, FeatureLayer, risk engine |
 | `field/` | Species, Patrol, TrackPoint, Observation, Media, SafetyAlert (panic / DMS / HWC), PositionPing, sync services, `hwc.py` details log |
@@ -69,6 +69,7 @@ All secrets come from the environment (optionally a git-ignored `.env`). See `.e
 | `TRUSTED_PROXY_COUNT` | 1 on Render (`RENDER` set), else 0 | proxies appending to `X-Forwarded-For`; client IP = right-most untrusted hop |
 | `DASHBOARD_URL` / `REPORT_SHARE_HOURS` | — / 48 | base URL for report share links / share lifetime |
 | `HEATMAP_CACHE_SECONDS` | 600 | TTL of a computed KDE surface (`areas/{id}/heatmap/`); newly synced records invalidate it regardless |
+| `TRACK_MAX_ACCURACY_M` | 35 | accuracy gate of the patrol track sanitiser (see **Patrol track quality**) |
 | `DATA_UPLOAD_MAX_BYTES` | 20 MB | max JSON body (sync push), also the gzip decompression cap |
 | `NOTIFY_BACKEND` | `console` | `console` or `twilio_fcm` |
 | `NOTIFY_ASYNC` / `NOTIFY_WORKERS` | `true` / 2 | deliver after commit on a background thread pool |
@@ -122,6 +123,9 @@ Dashboard demo data (GRTTS, relative to the time the seed runs, so re-run it to 
 Recompute risk: `manage.py score_risk --date 2026-09-15 [--org GRTTS] [--area <uuid>] [--hour 20]`
 (schedule nightly with cron / Task Scheduler).
 
+Recompute sanitised distances: `manage.py clean_tracks [--org GRTTS] [--area <uuid>]
+[--since 2026-09-01] [--dry-run]` — see **Patrol track quality** below.
+
 ## Tests
 
 ```powershell
@@ -158,6 +162,72 @@ email failures not breaking a push, Twilio error formatting / API-key auth / mes
 `requests.post`), the single `no manager has a phone number` row, and `notify/status/` + `notify/test/`
 (shape, masking, role gating, tenancy, throttle, audit).
 
+v1.7 additions: `test_track_clean.py` unit-tests the track sanitiser in `geo/track.py` (a clean
+synthetic walk measured within a few %, the same walk with injected 300 m outliers coming back within
+6 % of it, a stationary noisy sequence measuring 0 m, the anchor-relative drift radius, the accuracy
+gate and null accuracies, duplicate/out-of-order timestamps, each patrol-type speed ceiling, and a bad
+first fix not rejecting the whole track), then `patrols/{id}/track/` with and without `?clean=` and the
+`clean_tracks` command (dry run writes nothing, a client-supplied `distance_m` is never overwritten, a
+server-owned one is corrected, idempotent, `--org`/`--area`/`--since` filters).
+
+## Patrol track quality
+
+Up to app v1.6 the ranger app recorded positions from the GPS **and** the network (cell / Wi-Fi)
+provider behind a loose 50 m accuracy gate, with no jump or drift filtering. Network fixes land
+hundreds of metres away, so stored `field_trackpoint` rows contain outliers that inflate patrol
+distance and make the dashboard track zig-zag. The app now filters on the device; the server
+sanitises too, so tracks already stored — and any older app still in the field — are handled.
+
+`geo/track.py` (`geo.clean_track`) takes a time-ordered sequence of
+`(lat, lon, accuracy_m, speed_mps, recorded_at)` and returns the kept fixes plus the distance over
+them. It is pure — no database, no models — and unit-tested in `tests/test_track_clean.py`. Rules,
+in order, mirroring the app's new filter:
+
+| Rule | Threshold | Effect |
+|---|---|---|
+| Sanity | finite WGS84 lat/lon + a timestamp | dropped (`invalid`) |
+| Accuracy | worse than `TRACK_MAX_ACCURACY_M` (35 m) | dropped (`accuracy`). A **null** accuracy is *unknown*, not *bad*: kept, and still jump/drift checked |
+| Time | not strictly after the previous in-order fix | dropped (`time`) — duplicates and out-of-order points; the input is never re-sorted |
+| Jump | implied **or** reported speed above the patrol-type ceiling: foot 6, horseback 10, boat 20, vehicle 35 m/s | dropped (`jump`). Speed is measured from the last *kept* fix, so a lone outlier is discarded and the track continues. After 3 rejections in a row the next fix becomes a new anchor with a zero-length leg, so one bad *first* fix (or a recording gap) cannot reject the whole track |
+| Drift | movement under `max(8 m, 2 × accuracy)` from the last kept fix | dropped (`drift`); the anchor stays put, so jitter around a stationary ranger never accumulates |
+| Leg floor | legs under 3 m add no distance | a backstop below the drift floor |
+
+With the defaults the served distance always equals the length of the served geometry.
+
+**Raw track points are never modified or deleted** — only derived numbers change:
+
+* `Patrol.distance_clean_m` (migration `field/0005_patrol_distance_clean_m`, nullable) holds the
+  sanitised distance. It is **NULL** when the patrol has no track points at all — nothing to
+  measure is not the same as "walked nowhere".
+* `Patrol.distance_m` keeps its old meaning: the client's figure when `distance_from_client`, else
+  the server's. When the server owns it, it is now the sanitised total.
+* `Patrol.effective_distance_m` = the sanitised distance when there is one, else the stored one.
+  **Aggregates prefer it** (`dashboard/summary/`, `rangers/` today totals and current patrol, every
+  report table and the report map's `distance_m`), because the sanitised figure is the better
+  estimate and reports should not quote an inflated number. Payloads that mirror the row itself
+  (`GET patrols/`, `patrols/{id}/track/`) carry `distance_m` **and** `distance_clean_m` side by
+  side, so a client can still see exactly what was stored.
+* Report map tracks (GeoJSON) are drawn from the sanitised points too.
+
+`GET patrols/{client_uuid}/track/?clean=true|false` (**default true**) chooses which points the
+LineString and `times` use. The response shape is otherwise unchanged; the properties always carry
+`distance_m` (as stored on the patrol), `distance_clean_m` (measured over the sanitised track) and
+`points_dropped`, plus `clean` echoing the flag.
+
+```powershell
+.venv\Scripts\python manage.py clean_tracks --dry-run              # report, write nothing
+.venv\Scripts\python manage.py clean_tracks --org GRTTS --since 2026-09-01
+```
+
+`clean_tracks [--org CODE] [--area UUID] [--since YYYY-MM-DD] [--dry-run]` backfills
+`distance_clean_m` for patrols already stored (and corrects `distance_m` where the server owns it),
+printing per-organisation and overall totals: patrols examined, rows changed, points dropped, how
+many distances move by 1 m or more, and stored → clean kilometres with the delta and percentage.
+It is idempotent. Against the seeded demo data (67 patrols, 7 824 points) it drops 54 drift points
+and changes the total by −0.2 %: `seed_demo` generates plausible fixes, so there is little to fix —
+almost all of that delta is one hand-made test patrol whose client-supplied 1 850 m sits on a track
+that really measures 133 m (its `distance_m` is left alone; `distance_clean_m` records the truth).
+
 ## Local API for dashboard development
 
 ```powershell
@@ -185,7 +255,7 @@ Full contract: spec §5. Auth header `Authorization: Token <key>`. JSON snake_ca
   `alerts/` (+ `acknowledge/`, additive `resolve/`), `observations/`, `patrols/`, `positions/latest/`,
   `audit-log/`, `species/` (incl. `taxon_group`)
 * **Manager dashboard (spec §7)** — `dashboard/summary/`, `rangers/` (+ `{id}/`, `{id}/message/`),
-  `patrols/{client_uuid}/track/`, `positions/history/`, `areas/{id}/risk/` (+ `trend/`),
+  `patrols/{client_uuid}/track/` (+ `?clean=true|false`), `positions/history/`, `areas/{id}/risk/` (+ `trend/`),
   `areas/{id}/heatmap/` (v1.5 kernel density surface),
   `areas/{id}/coverage/` (+ `export/`), `reports/` (+ `{id}/`, `{id}/download/`, `{id}/share/`,
   `shared/{token}/`), `alerts/{id}/`, `alerts/{id}/dispatch/`; `areas/` setup counters,

@@ -35,6 +35,23 @@ def query_datetime(request, name: str) -> datetime | None:
     return value
 
 
+_TRUE = {"1", "true", "t", "yes", "y", "on"}
+_FALSE = {"0", "false", "f", "no", "n", "off"}
+
+
+def query_bool(request, name: str, default: bool | None = None) -> bool | None:
+    """``?flag=true|false`` (and the usual synonyms); ``default`` when absent or empty."""
+    raw = request.query_params.get(name)
+    if raw in (None, ""):
+        return default
+    value = raw.strip().lower()
+    if value in _TRUE:
+        return True
+    if value in _FALSE:
+        return False
+    raise serializers.ValidationError({name: ["Expected true or false."]})
+
+
 def query_uuid(request, name: str):
     import uuid
 

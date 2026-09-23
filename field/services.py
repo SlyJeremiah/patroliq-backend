@@ -10,7 +10,9 @@ Push semantics
   * Track points have no client id; they are de-duplicated on (patrol_client_uuid, recorded_at).
   * ``cell_id`` is always derived server-side from lat/lon (client value ignored).
   * ``distance_m`` / ``duration_s`` are computed from stored track points / timestamps when the
-    client did not send them.
+    client did not send them. ``distance_clean_m`` — the distance over the *sanitised* track
+    (``geo.track``) — is recomputed either way, so a client-supplied figure is kept but is no
+    longer the only number available. Raw track points are always stored untouched.
   * Suspended licence: everything except safety alerts is rejected with the *retryable* code
     ``licence_suspended`` (keep it queued); safety alerts are always stored.
 """
@@ -86,11 +88,32 @@ def _invalid(rejected, client_uuid, errors, prefix=""):
     _reject(rejected, client_uuid, code, f"{prefix}{msg}")
 
 
+def track_fixes(patrol: Patrol):
+    """The patrol's stored track points, time-ordered, in ``geo.clean_track`` input shape."""
+    return (TrackPoint.objects.filter(organisation_id=patrol.organisation_id, patrol_id=patrol.pk)
+            .order_by("recorded_at").values_list("lat", "lon", "accuracy_m", "speed_mps", "recorded_at"))
+
+
+def sanitised_track(patrol: Patrol) -> geo.CleanTrack:
+    """Sanitise the patrol's stored track with its own patrol-type speed ceiling."""
+    return geo.clean_track(track_fixes(patrol), patrol_type=patrol.patrol_type)
+
+
 def recompute_patrol_metrics(patrol: Patrol) -> None:
-    fields = []
+    """
+    Refresh the derived distance/duration columns from the stored track points.
+
+    ``distance_clean_m`` is always recomputed: even when the client sent ``distance_m`` (older app
+    versions summed unfiltered GPS *and* network fixes), the sanitised figure is the one reports
+    should use. It stays NULL while the patrol has no track points at all, because then there is
+    nothing to measure — 0.0 would wrongly read as "walked nowhere". When the server owns the
+    distance, ``distance_m`` is the sanitised total too.
+    """
+    fields = ["distance_clean_m"]
+    track = sanitised_track(patrol)
+    patrol.distance_clean_m = round(track.distance_m, 1) if track.total else None
     if not patrol.distance_from_client:
-        pts = TrackPoint.objects.filter(patrol_id=patrol.pk).order_by("recorded_at").values_list("lat", "lon")
-        patrol.distance_m = round(geo.path_length_m(pts), 1)
+        patrol.distance_m = patrol.distance_clean_m or 0.0
         fields.append("distance_m")
     if not patrol.duration_from_client:
         end = patrol.ended_at

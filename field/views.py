@@ -13,6 +13,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+import geo
 from accounts.auth import SafetyTokenAuthentication
 from accounts.licensing import module_enabled
 from accounts.models import User
@@ -32,7 +33,7 @@ from core.exceptions import ApiError
 from core.models import Tombstone
 from core.permissions import FIELD_ROLES, MANAGERS, ORG_ROLES, RANGER, IsOrgMember, roles_allowed
 from core.tenancy import TenantScopedMixin
-from core.utils import query_date, query_datetime, query_uuid
+from core.utils import query_bool, query_date, query_datetime, query_uuid
 from core.validation import reject_unexpected, sanitize_text
 
 from . import services
@@ -567,6 +568,13 @@ class PatrolTrackView(APIView):
     ``geometry`` is null while the patrol has fewer than two track points. Additive properties:
     ``client_uuid``, ``ranger_name``, ``patrol_type``, ``duration_s``, ``point_count`` and ``times``
     (ISO timestamps parallel to the coordinates, for replay).
+
+    ``?clean=true|false`` (default **true**) selects the sanitised track (``geo.track``): accuracy,
+    jump and drift outliers from the old GPS+network recording are left out of ``geometry`` /
+    ``times``, so the line does not zig-zag. ``clean=false`` returns every stored point. Either way
+    the properties carry ``distance_m`` (as stored on the patrol), ``distance_clean_m`` (measured
+    over the sanitised track, always, so the two can be compared) and ``points_dropped`` (how many
+    stored points the sanitiser rejected).
     """
 
     permission_classes = [roles_allowed(read=MANAGERS)]
@@ -575,10 +583,12 @@ class PatrolTrackView(APIView):
         patrol = Patrol.objects.for_org(request.user.organisation).select_related("ranger").filter(pk=client_uuid).first()
         if patrol is None:
             raise ApiError(404, "not_found", "Patrol not found.")
-        pts = list(TrackPoint.objects.filter(organisation_id=patrol.organisation_id, patrol_id=patrol.pk)
-                   .order_by("recorded_at").values_list("lon", "lat", "recorded_at"))
+        clean = query_bool(request, "clean", default=True)
+        rows = list(services.track_fixes(patrol))
+        track = geo.clean_track(rows, patrol_type=patrol.patrol_type)
+        pts = track.points if clean else [geo.Fix(*r) for r in rows]
         dt = serializers.DateTimeField()
-        coords = [[round(lon, 7), round(lat, 7)] for lon, lat, _ in pts]
+        coords = [[round(p.lon, 7), round(p.lat, 7)] for p in pts]
         return Response({
             "type": "Feature",
             "id": str(patrol.pk),
@@ -587,9 +597,11 @@ class PatrolTrackView(APIView):
                 "client_uuid": str(patrol.pk), "ranger_id": str(patrol.ranger_id),
                 "ranger_name": patrol.ranger.full_name, "started_at": dt.to_representation(patrol.started_at),
                 "ended_at": dt.to_representation(patrol.ended_at) if patrol.ended_at else None,
-                "distance_m": int(round(patrol.distance_m or 0)), "duration_s": patrol.duration_s,
+                "distance_m": int(round(patrol.distance_m or 0)),
+                "distance_clean_m": int(round(track.distance_m)), "points_dropped": track.points_dropped,
+                "clean": clean, "duration_s": patrol.duration_s,
                 "status": patrol.status, "patrol_type": patrol.patrol_type, "area_id": str(patrol.area_id),
-                "point_count": len(coords), "times": [dt.to_representation(t) for _, _, t in pts],
+                "point_count": len(coords), "times": [dt.to_representation(p.recorded_at) for p in pts],
             },
         })
 

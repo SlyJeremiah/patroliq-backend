@@ -127,10 +127,12 @@ def live_status(org, rangers: list[User], now=None) -> dict:
 def ranger_today(org, ids, tz) -> dict:
     start, end = day_bounds(local_today(tz), tz)
     today = defaultdict(lambda: {"distance_m": 0, "observations": 0, "patrols": 0, "cells_visited": set()})
-    for rid, dist in Patrol.objects.for_org(org).filter(ranger_id__in=ids, started_at__gte=start, started_at__lt=end) \
-            .values_list("ranger_id", "distance_m"):
+    # Patrol.effective_distance_m in query form: the sanitised distance when the patrol has a
+    # track, else the stored one (see geo/track.py) — aggregates report the better number.
+    for rid, dist, clean in Patrol.objects.for_org(org).filter(ranger_id__in=ids, started_at__gte=start, started_at__lt=end) \
+            .values_list("ranger_id", "distance_m", "distance_clean_m"):
         today[rid]["patrols"] += 1
-        today[rid]["distance_m"] += dist or 0
+        today[rid]["distance_m"] += (dist or 0) if clean is None else clean
     for rid, n in Observation.objects.for_org(org).filter(observer_id__in=ids, recorded_at__gte=start, recorded_at__lt=end) \
             .values("observer_id").annotate(n=Count("pk")).values_list("observer_id", "n"):
         today[rid]["observations"] = n
@@ -163,7 +165,7 @@ def ranger_payloads(org, rangers: list[User], area: Area | None = None) -> list[
             "last_position": {"lat": ping.lat, "lon": ping.lon, "accuracy_m": ping.accuracy_m,
                               "battery_pct": ping.battery_pct, "recorded_at": fmt(ping.recorded_at)} if ping else None,
             "current_patrol": {"client_uuid": str(patrol.pk), "started_at": fmt(patrol.started_at), "status": patrol.status,
-                               "distance_m": int(round(patrol.distance_m or 0)), "patrol_type": patrol.patrol_type}
+                               "distance_m": int(round(patrol.effective_distance_m)), "patrol_type": patrol.patrol_type}
             if patrol else None,
             "today": today.get(u.pk, empty),
             "last_sync_at": fmt(u.last_sync_at),
